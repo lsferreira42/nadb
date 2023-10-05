@@ -1,2 +1,5 @@
 .vscode
 data/
+__pycache__/
+dist/
+nadb.egg-info/

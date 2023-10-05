@@ -27,9 +27,6 @@ Here's a basic example of how to use NADB:
 ```python
 from nadb import KeyValueStore, KeyValueSync
 
-# Initialize the KeyValueSync for asynchronous flushing
-kv_sync = KeyValueSync()
-
 # Create a KeyValueStore instance
 
 data_folder_path = './data'
@@ -37,7 +34,12 @@ db_name = 'db1'
 buffer_size_mb = 1  # 1 MB
 flush_interval_seconds = 60  # 1 minute
 namespace = 'namespace1'
-kv_store = KeyValueStore(data_folder_path, db_name, buffer_size_mb, flush_interval_seconds, namespace)
+
+# Initialize the KeyValueSync for asynchronous flushing
+kv_sync = KeyValueSync(flush_interval_seconds)
+
+# Initialize the KeyValueStore
+kv_store = KeyValueStore(data_folder_path, db_name, buffer_size_mb, namespace, kv_sync)
 
 # Set some key-value pairs
 kv_store.set('key1', 'value1')
