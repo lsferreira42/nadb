@@ -1,0 +1,14 @@
+[[source]]
+name = "pypi"
+url = "https://pypi.org/simple"
+verify_ssl = true
+
+[dev-packages]
+
+[packages]
+nadb = "==0.0.5"
+
+[requires]
+python_version = ">=3.6"
+
+[scripts]

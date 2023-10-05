@@ -1,6 +1,6 @@
 # NADB - Not A Database
 
-A simple, thread-safe key-value store with asynchronous disk buffering capabilities.
+A simple, thread-safe, zero external dependencies key-value store with asynchronous memory buffering capabilities and disk persistence.
 
 :rotating_light: **This project is educational and not intended for production use.** :rotating_light:
 
