@@ -4,7 +4,7 @@ setup(
     packages=['nadb'],
     package_dir={'nadb': '.'},
     name='nadb',
-    version='0.0.6',
+    version='0.0.7',
     install_requires=[],
     author='Leandro Ferreira',
     author_email='leandrodsferreira@gmail.com',

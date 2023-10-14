@@ -6,7 +6,7 @@ verify_ssl = true
 [dev-packages]
 
 [packages]
-nadb = "==0.0.5"
+nadb = "==0.0.7"
 
 [requires]
 python_version = ">=3.6"
