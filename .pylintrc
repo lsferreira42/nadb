@@ -1,0 +1,8 @@
+[CLASS]
+max-attributes=10
+
+[FUNCTION]
+max-args=6
+
+[MESSAGES CONTROL]
+disable=W1203
