@@ -1,0 +1,15 @@
+include README.md
+include LICENSE
+include pyproject.toml
+include Makefile
+include sql/*.sql
+include nakv.py
+include nakv_tests.py
+exclude .gitignore
+exclude .vscode/
+exclude __pycache__/
+exclude *.pyc
+exclude data/
+exclude *.egg-info/
+exclude dist/
+exclude build/ 
