@@ -227,13 +227,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 This project uses GitHub Actions for continuous integration. Every push to the main branch and every pull request will trigger the test suite to run against multiple Python versions.
 
-To set up the badges in this README correctly, replace `username` in the badge URLs with your actual GitHub username:
-
-```markdown
-[![Tests](https://github.com/username/nadb/actions/workflows/tests.yml/badge.svg)](https://github.com/username/nadb/actions/workflows/tests.yml)
-[![codecov](https://codecov.io/gh/username/nadb/branch/main/graph/badge.svg)](https://codecov.io/gh/username/nadb)
-```
-
 ### Running Tests Locally
 
 To run the tests locally:
