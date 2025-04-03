@@ -1,2 +1,0 @@
-Requirement already satisfied: redis in /Users/leandroferreira/.pyenv/versions/3.10.7/Library/Frameworks/Python.framework/Versions/3.10/lib/python3.10/site-packages (5.0.4)
-Requirement already satisfied: async-timeout>=4.0.3 in /Users/leandroferreira/.pyenv/versions/3.10.7/Library/Frameworks/Python.framework/Versions/3.10/lib/python3.10/site-packages (from redis) (4.0.3)

@@ -9,11 +9,18 @@ import logging
 import zlib
 import json
 import time
+import random
 from datetime import datetime, timedelta
 
 # Constants for compression
 COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
 COMPRESS_LEVEL = 6  # Medium compression (range is 0-9)
+
+# Redis connection parameters
+DEFAULT_CONNECTION_TIMEOUT = 5.0  # Default connection timeout in seconds
+DEFAULT_SOCKET_TIMEOUT = 10.0  # Default socket timeout in seconds
+MAX_RECONNECT_ATTEMPTS = 5  # Maximum number of reconnection attempts
+INITIAL_RETRY_DELAY = 0.5  # Initial retry delay in seconds
 
 try:
     import redis
@@ -24,7 +31,9 @@ except ImportError:
 class RedisStorage:
     """Redis storage backend for NADB key-value store."""
     
-    def __init__(self, base_path=None, host='localhost', port=6379, db=0, password=None, **kwargs):
+    def __init__(self, base_path=None, host='localhost', port=6379, db=0, password=None, 
+                 socket_timeout=DEFAULT_SOCKET_TIMEOUT, 
+                 connection_timeout=DEFAULT_CONNECTION_TIMEOUT, **kwargs):
         """
         Initialize Redis storage backend.
         
@@ -34,6 +43,8 @@ class RedisStorage:
             port: Redis port
             db: Redis database number
             password: Redis password
+            socket_timeout: Timeout for socket operations (in seconds)
+            connection_timeout: Timeout for connection attempts (in seconds)
             **kwargs: Additional Redis connection parameters
         """
         if redis is None:
@@ -47,8 +58,16 @@ class RedisStorage:
             'port': port,
             'db': db,
             'password': password,
+            'socket_timeout': socket_timeout,
+            'socket_connect_timeout': connection_timeout,
             **kwargs
         }
+        
+        # Connection state tracking
+        self.connected = False
+        self.last_connection_error = None
+        self.connection_errors = 0
+        self.last_reconnect_time = 0
         
         # Connect to Redis
         self._connect()
@@ -63,28 +82,125 @@ class RedisStorage:
     
     def _connect(self):
         """
-        Connect to Redis server.
+        Connect to Redis server with exponential backoff for retries.
         
         Returns:
             True if connection successful, False otherwise
         """
+        # Reset the connected flag
+        self.connected = False
+        
+        # Determine if we should throttle reconnection attempts
+        now = time.time()
+        time_since_last_attempt = now - self.last_reconnect_time
+        
+        # If we've tried recently, implement exponential backoff
+        if time_since_last_attempt < 10 and self.connection_errors > 0:
+            # Calculate backoff time based on number of previous errors
+            backoff = min(30, INITIAL_RETRY_DELAY * (2 ** (self.connection_errors - 1)))
+            # Add jitter (0-100% of backoff)
+            jitter = random.uniform(0, backoff)
+            backoff_with_jitter = backoff + jitter
+            
+            if time_since_last_attempt < backoff_with_jitter:
+                self.logger.warning(
+                    f"Throttling Redis reconnection attempt. "
+                    f"Will retry in {backoff_with_jitter - time_since_last_attempt:.1f}s "
+                    f"(error count: {self.connection_errors})"
+                )
+                return False
+        
+        # Update last reconnect time
+        self.last_reconnect_time = now
+        
         try:
             self.redis = redis.Redis(**self.connection_params)
-            # Test connection
+            # Test connection with a timeout
             self.redis.ping()
+            self.connected = True
+            
+            # Reset error tracking after successful connection
+            if self.connection_errors > 0:
+                self.logger.info(f"Successfully reconnected to Redis after {self.connection_errors} failed attempts")
+            self.connection_errors = 0
+            self.last_connection_error = None
+            
             return True
         except redis.ConnectionError as e:
-            self.logger.error(f"Redis connection error: {str(e)}")
+            self.connection_errors += 1
+            self.last_connection_error = str(e)
+            self.logger.error(f"Redis connection error (attempt {self.connection_errors}): {str(e)}")
+            return False
+        except redis.RedisError as e:
+            self.connection_errors += 1
+            self.last_connection_error = str(e)
+            self.logger.error(f"Redis error during connection (attempt {self.connection_errors}): {str(e)}")
+            return False
+        except Exception as e:
+            self.connection_errors += 1
+            self.last_connection_error = str(e)
+            self.logger.error(f"Unexpected error connecting to Redis (attempt {self.connection_errors}): {str(e)}")
             return False
     
     def _ensure_connection(self):
-        """Ensure Redis connection is active, reconnect if necessary."""
+        """
+        Ensure Redis connection is active, reconnect if necessary with exponential backoff.
+        
+        Returns:
+            True if connected, False otherwise
+        """
+        # If we think we're connected, verify with a ping
+        if self.connected:
+            try:
+                self.redis.ping()
+                return True
+            except (redis.ConnectionError, redis.RedisError, AttributeError):
+                self.connected = False
+                self.logger.warning("Redis connection lost, attempting to reconnect...")
+        
+        # We're definitely not connected; try to reconnect
+        if self.connection_errors >= MAX_RECONNECT_ATTEMPTS:
+            self.logger.error(
+                f"Maximum Redis reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) exceeded. "
+                f"Last error: {self.last_connection_error}"
+            )
+            return False
+            
+        # Try to reconnect
+        return self._connect()
+    
+    def _execute_with_retry(self, operation_name, redis_func, *args, **kwargs):
+        """
+        Execute a Redis operation with automatic reconnection on failure.
+        
+        Args:
+            operation_name: Name of the operation (for logging)
+            redis_func: Function to call
+            *args, **kwargs: Arguments to pass to the function
+            
+        Returns:
+            Result of the Redis operation, or None on failure
+            
+        Raises:
+            redis.RedisError: If the operation fails after reconnection attempts
+        """
+        if not self._ensure_connection():
+            self.logger.error(f"Cannot execute {operation_name}: not connected to Redis")
+            raise redis.ConnectionError(f"Not connected to Redis server: {self.last_connection_error}")
+            
         try:
-            self.redis.ping()
-        except (redis.ConnectionError, AttributeError):
-            self.logger.warning("Redis connection lost, attempting to reconnect...")
-            return self._connect()
-        return True
+            return redis_func(*args, **kwargs)
+        except redis.ConnectionError as e:
+            # Connection lost during operation
+            self.connected = False
+            self.logger.warning(f"Redis connection lost during {operation_name}: {str(e)}")
+            
+            # Try to reconnect once and retry the operation
+            if self._connect():
+                self.logger.info(f"Reconnected to Redis, retrying {operation_name}")
+                return redis_func(*args, **kwargs)
+            else:
+                raise
     
     def _get_data_key(self, relative_path):
         """
@@ -147,14 +263,12 @@ class RedisStorage:
         Returns:
             True if data exists, False otherwise
         """
-        if not self._ensure_connection():
-            return False
-        
         try:
             key = self._get_data_key(relative_path)
-            return self.redis.exists(key) > 0
+            exists = self._execute_with_retry("file_exists", lambda: self.redis.exists(key) > 0)
+            return exists
         except redis.RedisError as e:
-            self.logger.error(f"Redis error in file_exists: {str(e)}")
+            self.logger.error(f"Redis error in file_exists for {relative_path}: {str(e)}")
             return False
     
     def write_data(self, relative_path, data):
@@ -168,45 +282,58 @@ class RedisStorage:
         Returns:
             True if successful, False otherwise
         """
-        if not self._ensure_connection():
-            return False
-        
         try:
             key = self._get_data_key(relative_path)
             
-            # Store the data
-            success = self.redis.set(key, data)
-            
-            # Get metadata for this key to set TTL if needed
-            # We need to extract the original key, db, and namespace from the path
-            parts = relative_path.split('/')
-            if len(parts) >= 4:
-                db = parts[0]
-                try:
-                    # Try to find metadata with this path
-                    for pattern in [f"nadb:meta:{db}:*:*"]:
-                        meta_keys = self.redis.keys(pattern)
-                        for meta_key in meta_keys:
-                            meta_data = self.redis.hgetall(meta_key)
-                            # Check if this metadata entry has this path
-                            path_key = b'path'
-                            if path_key in meta_data:
-                                stored_path = json.loads(meta_data[path_key].decode('utf-8'))
-                                if stored_path == relative_path:
-                                    # Found matching metadata, check for TTL
-                                    ttl_key = b'ttl'
-                                    if ttl_key in meta_data:
-                                        ttl = json.loads(meta_data[ttl_key].decode('utf-8'))
-                                        if ttl is not None and ttl > 0:
-                                            # Set TTL on the data key
-                                            self.redis.expire(key, ttl)
-                                            break
-                except Exception as e:
-                    self.logger.error(f"Error setting TTL on data key: {str(e)}")
-            
-            return success
+            # Use a Redis transaction to ensure atomicity
+            with self.redis.pipeline() as pipe:
+                # Store the data
+                pipe.set(key, data)
+                
+                # Get metadata for this key to set TTL if needed
+                # Extract the original key, db, and namespace from the path
+                parts = relative_path.split('/')
+                if len(parts) >= 4:
+                    db = parts[0]
+                    try:
+                        # Try to find metadata with this path
+                        for pattern in [f"nadb:meta:{db}:*:*"]:
+                            meta_keys = self._execute_with_retry(
+                                "get_meta_keys", 
+                                lambda: self.redis.keys(pattern)
+                            )
+                            
+                            for meta_key in meta_keys:
+                                meta_data = self._execute_with_retry(
+                                    "get_meta", 
+                                    lambda: self.redis.hgetall(meta_key)
+                                )
+                                
+                                # Check if this metadata entry has this path
+                                path_key = b'path'
+                                if path_key in meta_data:
+                                    stored_path = json.loads(meta_data[path_key].decode('utf-8'))
+                                    if stored_path == relative_path:
+                                        # Found matching metadata, check for TTL
+                                        ttl_key = b'ttl'
+                                        if ttl_key in meta_data:
+                                            ttl = json.loads(meta_data[ttl_key].decode('utf-8'))
+                                            if ttl is not None and ttl > 0:
+                                                # Add TTL to the pipeline
+                                                pipe.expire(key, ttl)
+                                                break
+                    except Exception as e:
+                        self.logger.error(f"Error setting TTL on data key: {str(e)}")
+                
+                # Execute the pipeline
+                results = pipe.execute()
+                return all(results)
+                
         except redis.RedisError as e:
-            self.logger.error(f"Redis error in write_data: {str(e)}")
+            self.logger.error(f"Redis error in write_data for {relative_path}: {str(e)}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Unexpected error in write_data for {relative_path}: {str(e)}")
             return False
     
     def read_data(self, relative_path):
@@ -219,12 +346,9 @@ class RedisStorage:
         Returns:
             Binary data if successful, None otherwise
         """
-        if not self._ensure_connection():
-            return None
-        
         try:
             key = self._get_data_key(relative_path)
-            data = self.redis.get(key)
+            data = self._execute_with_retry("read_data", lambda: self.redis.get(key))
             
             # If data is None, the key might be expired or not exist
             if data is None:
@@ -233,7 +357,10 @@ class RedisStorage:
             
             return data
         except redis.RedisError as e:
-            self.logger.error(f"Redis error in read_data: {str(e)}")
+            self.logger.error(f"Redis error in read_data for {relative_path}: {str(e)}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error in read_data for {relative_path}: {str(e)}")
             return None
     
     def delete_file(self, relative_path):
@@ -440,13 +567,16 @@ class RedisStorage:
             return
             
         try:
+            # Ensure tag uniqueness for consistency with other backends
+            unique_tags = list(set(tags))
+            
             # Add metadata key to each tag's set
-            for tag in tags:
+            for tag in unique_tags:
                 tag_key = f"{self.tag_prefix}{tag}"
                 self.redis.sadd(tag_key, meta_key)
                 
             # Store tags for this metadata
-            self.redis.hmset(meta_key, {"tags": json.dumps(tags)})
+            self.redis.hmset(meta_key, {"tags": json.dumps(unique_tags)})
         except redis.RedisError as e:
             self.logger.error(f"Redis error in _set_tags: {str(e)}")
     

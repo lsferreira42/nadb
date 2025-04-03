@@ -190,13 +190,16 @@ class KeyValueMetadata:
             tags: List of tag names
         """
         try:
+            # Ensure tag uniqueness to prevent SQLite UNIQUE constraint violations
+            unique_tags = list(set(tags)) if tags else []
+            
             db = self._get_db_connection()
             with self.connection_lock:
                 # First, remove any existing tags for this metadata
                 db.execute("DELETE FROM metadata_tags WHERE metadata_id = ?", (metadata_id,))
                 
                 # Add each tag
-                for tag_name in tags:
+                for tag_name in unique_tags:
                     # Check if tag exists
                     cursor = db.execute("SELECT id FROM tags WHERE tag_name = ?", (tag_name,))
                     row = cursor.fetchone()
