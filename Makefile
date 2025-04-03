@@ -11,6 +11,7 @@ help:
 	@echo "  test        - Run basic filesystem tests (default)"
 	@echo "  test-fs     - Run file system backend tests only"
 	@echo "  test-redis  - Run Redis backend tests only"
+	@echo "  test-backends - Run storage backends tests only"
 	@echo "  test-all    - Run all tests for all backends"
 	@echo "  test-quick  - Run tests without slow tests"
 	@echo "  test-cov    - Run tests with coverage report"
@@ -53,19 +54,28 @@ test-fs: dev-install
 
 # Run Redis tests specifically
 test-redis: install-redis
+	@echo "Redis must be running on localhost:6379 for these tests"
 	PYTHONPATH=. pytest -v nakv_tests_redis.py
+
+# Run storage backends tests specifically
+test-backends: install-redis
+	@echo "Redis must be running on localhost:6379 for these tests"
+	PYTHONPATH=. pytest -v nakv_tests_storage_backends.py
 
 # Run all tests for all backends
 test-all: install-redis
-	PYTHONPATH=. pytest -v nakv_tests_fs.py nakv_tests_redis.py
+	@echo "Redis must be running on localhost:6379 for these tests"
+	PYTHONPATH=. pytest -v nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py
 
 # Run tests without slow tests (marked with @pytest.mark.slow)
 test-quick: dev-install
 	PYTHONPATH=. pytest -v nakv_tests_fs.py -k "not slow"
 
 # Run tests with coverage report
-test-cov: install-redis
-	PYTHONPATH=. pytest --cov=. nakv_tests_fs.py nakv_tests_redis.py --cov-report=term --cov-report=html
+test-cov: 
+	pip install -e ".[redis,dev]"
+	@echo "Redis must be running on localhost:6379 for these tests"
+	PYTHONPATH=. pytest --cov=. nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py --cov-report=term --cov-report=html
 	@echo "HTML coverage report generated in htmlcov/"
 
 # Run linting tools

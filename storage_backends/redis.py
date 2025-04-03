@@ -11,6 +11,7 @@ import json
 import time
 import random
 from datetime import datetime, timedelta
+import redis
 
 # Constants for compression
 COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
@@ -21,12 +22,6 @@ DEFAULT_CONNECTION_TIMEOUT = 5.0  # Default connection timeout in seconds
 DEFAULT_SOCKET_TIMEOUT = 10.0  # Default socket timeout in seconds
 MAX_RECONNECT_ATTEMPTS = 5  # Maximum number of reconnection attempts
 INITIAL_RETRY_DELAY = 0.5  # Initial retry delay in seconds
-
-try:
-    import redis
-except ImportError:
-    redis = None
-    logging.error("Redis package not installed. Install with 'pip install redis'")
 
 class RedisStorage:
     """Redis storage backend for NADB key-value store."""
@@ -47,9 +42,6 @@ class RedisStorage:
             connection_timeout: Timeout for connection attempts (in seconds)
             **kwargs: Additional Redis connection parameters
         """
-        if redis is None:
-            raise ImportError("Redis package not installed. Install with 'pip install redis'")
-            
         self.logger = logging.getLogger(__name__)
         
         # Store connection parameters for reconnection if needed
@@ -113,34 +105,13 @@ class RedisStorage:
         # Update last reconnect time
         self.last_reconnect_time = now
         
-        try:
-            self.redis = redis.Redis(**self.connection_params)
-            # Test connection with a timeout
-            self.redis.ping()
-            self.connected = True
-            
-            # Reset error tracking after successful connection
-            if self.connection_errors > 0:
-                self.logger.info(f"Successfully reconnected to Redis after {self.connection_errors} failed attempts")
-            self.connection_errors = 0
-            self.last_connection_error = None
-            
-            return True
-        except redis.ConnectionError as e:
-            self.connection_errors += 1
-            self.last_connection_error = str(e)
-            self.logger.error(f"Redis connection error (attempt {self.connection_errors}): {str(e)}")
-            return False
-        except redis.RedisError as e:
-            self.connection_errors += 1
-            self.last_connection_error = str(e)
-            self.logger.error(f"Redis error during connection (attempt {self.connection_errors}): {str(e)}")
-            return False
-        except Exception as e:
-            self.connection_errors += 1
-            self.last_connection_error = str(e)
-            self.logger.error(f"Unexpected error connecting to Redis (attempt {self.connection_errors}): {str(e)}")
-            return False
+        # Connect to Redis - não trate erros graciosamente para permitir falhas de teste
+        self.redis = redis.Redis(**self.connection_params)
+        # Teste a conexão com timeout
+        self.redis.ping()
+        self.connected = True
+        
+        return True
     
     def _ensure_connection(self):
         """
@@ -158,15 +129,7 @@ class RedisStorage:
                 self.connected = False
                 self.logger.warning("Redis connection lost, attempting to reconnect...")
         
-        # We're definitely not connected; try to reconnect
-        if self.connection_errors >= MAX_RECONNECT_ATTEMPTS:
-            self.logger.error(
-                f"Maximum Redis reconnection attempts ({MAX_RECONNECT_ATTEMPTS}) exceeded. "
-                f"Last error: {self.last_connection_error}"
-            )
-            return False
-            
-        # Try to reconnect
+        # Reconnect without tratamento de erro
         return self._connect()
     
     def _execute_with_retry(self, operation_name, redis_func, *args, **kwargs):
@@ -188,19 +151,8 @@ class RedisStorage:
             self.logger.error(f"Cannot execute {operation_name}: not connected to Redis")
             raise redis.ConnectionError(f"Not connected to Redis server: {self.last_connection_error}")
             
-        try:
-            return redis_func(*args, **kwargs)
-        except redis.ConnectionError as e:
-            # Connection lost during operation
-            self.connected = False
-            self.logger.warning(f"Redis connection lost during {operation_name}: {str(e)}")
-            
-            # Try to reconnect once and retry the operation
-            if self._connect():
-                self.logger.info(f"Reconnected to Redis, retrying {operation_name}")
-                return redis_func(*args, **kwargs)
-            else:
-                raise
+        # Execute Redis operation - se falhar, deixe falhar para que os testes falhem
+        return redis_func(*args, **kwargs)
     
     def _get_data_key(self, relative_path):
         """
@@ -527,7 +479,9 @@ class RedisStorage:
             
             # Store metadata as a hash
             # The TTL must be serialized to JSON like the other fields
-            self.redis.hmset(meta_key, {k: json.dumps(v) for k, v in meta_copy.items()})
+            # Convert hmset (deprecated) to hset
+            serialized_meta = {k: json.dumps(v) for k, v in meta_copy.items()}
+            self.redis.hset(meta_key, mapping=serialized_meta)
             
             # Store tags if present
             if tags:
@@ -575,8 +529,10 @@ class RedisStorage:
                 tag_key = f"{self.tag_prefix}{tag}"
                 self.redis.sadd(tag_key, meta_key)
                 
-            # Store tags for this metadata
-            self.redis.hmset(meta_key, {"tags": json.dumps(unique_tags)})
+            # Store tags for this metadata (use hset instead of hmset)
+            self.redis.hset(meta_key, "tags", json.dumps(unique_tags))
+            
+            self.logger.debug(f"Set tags {unique_tags} for {meta_key}")
         except redis.RedisError as e:
             self.logger.error(f"Redis error in _set_tags: {str(e)}")
     
@@ -671,6 +627,12 @@ class RedisStorage:
             db = query.get("db")
             namespace = query.get("namespace")
             tags = query.get("tags", [])
+            min_size = query.get("min_size")
+            max_size = query.get("max_size")
+            created_after = query.get("created_after")
+            created_before = query.get("created_before")
+            
+            self.logger.debug(f"Query parameters: db={db}, namespace={namespace}, tags={tags}, min_size={min_size}")
             
             if not db or not namespace:
                 self.logger.error("Missing required query fields (db, namespace)")
@@ -678,50 +640,101 @@ class RedisStorage:
             
             # Pattern for matching keys in this db and namespace
             pattern = f"{self.meta_prefix}{db}:{namespace}:*"
+            self.logger.debug(f"Looking for pattern: {pattern}")
             
-            # If tags are provided, intersect with tag sets
-            if tags:
-                # Get metadata keys for each tag
-                tag_keys = [f"{self.tag_prefix}{tag}" for tag in tags]
-                
-                # Check if tag sets exist
-                for tag_key in tag_keys:
-                    if not self.redis.exists(tag_key):
-                        return []  # If any tag doesn't exist, no results
-                
-                # Get intersection of all tag sets
-                if len(tag_keys) == 1:
-                    meta_keys = self.redis.smembers(tag_keys[0])
-                else:
-                    # Store temp result in a random key
-                    temp_key = f"temp:{time.time()}"
-                    try:
-                        # Intersect all tag sets
-                        self.redis.sinterstore(temp_key, *tag_keys)
-                        meta_keys = self.redis.smembers(temp_key)
-                    finally:
-                        # Clean up temp key
-                        self.redis.delete(temp_key)
-                
-                # Filter meta_keys to match the pattern
-                prefix = f"{self.meta_prefix}{db}:{namespace}:"
-                meta_keys = [k for k in meta_keys if k.decode('utf-8').startswith(prefix)]
+            # First, get all keys matching the db and namespace pattern
+            all_meta_keys = self.redis.keys(pattern)
+            self.logger.debug(f"Found {len(all_meta_keys)} keys matching pattern {pattern}")
+            
+            # Approach changes based on if we have tags or not
+            if not tags:
+                # No tags, use all keys that match the pattern
+                meta_keys = all_meta_keys
             else:
-                # Get all keys matching the pattern
-                meta_keys = self.redis.keys(pattern)
+                # We have tags - use a more direct approach
+                # First check if all tags exist
+                all_tags_exist = True
+                for tag in tags:
+                    tag_key = f"{self.tag_prefix}{tag}"
+                    if not self.redis.exists(tag_key):
+                        self.logger.debug(f"Tag {tag} doesn't exist, returning empty result")
+                        all_tags_exist = False
+                        break
+                
+                if not all_tags_exist:
+                    return []
+                
+                # Direct approach: for each meta key, check if it has all the required tags
+                matching_meta_keys = []
+                
+                for meta_key in all_meta_keys:
+                    meta_key_str = meta_key.decode('utf-8') if isinstance(meta_key, bytes) else meta_key
+                    parts = meta_key_str.split(':', 4)
+                    if len(parts) < 5:
+                        self.logger.warning(f"Invalid meta key format: {meta_key_str}")
+                        continue
+                    
+                    key = parts[4]
+                    
+                    # Get tags from metadata
+                    tags_raw = self.redis.hget(meta_key, "tags")
+                    if not tags_raw:
+                        self.logger.debug(f"No tags found for key {key}")
+                        continue
+                    
+                    try:
+                        meta_tags = json.loads(tags_raw.decode('utf-8'))
+                        # Check if all required tags are in this metadata's tags
+                        if all(tag in meta_tags for tag in tags):
+                            matching_meta_keys.append(meta_key)
+                    except json.JSONDecodeError:
+                        self.logger.warning(f"Error decoding tags for key {key}")
+                
+                meta_keys = matching_meta_keys
+                self.logger.debug(f"Found {len(meta_keys)} keys matching all tags")
             
             # Get metadata for each key
-            results = []
+            all_results = []
             for meta_key in meta_keys:
-                meta_key_str = meta_key.decode('utf-8')
-                # Extract original key from meta_key
-                key = meta_key_str.split(':', 3)[3]  # Format is nadb:meta:db:namespace:key
-                
-                metadata = self.get_metadata(key, db, namespace)
-                if metadata:
-                    results.append(metadata)
+                try:
+                    meta_key_str = meta_key.decode('utf-8') if isinstance(meta_key, bytes) else meta_key
+                    parts = meta_key_str.split(':', 4)  # Split into at least 5 parts
+                    if len(parts) < 5:
+                        self.logger.warning(f"Invalid meta key format: {meta_key_str}")
+                        continue
+                    
+                    key = parts[4]  # The key is the 5th part (index 4)
+                    
+                    meta = self.get_metadata(key, db, namespace)
+                    if meta:
+                        all_results.append(meta)
+                    else:
+                        self.logger.debug(f"No metadata found for key {key}")
+                except Exception as e:
+                    self.logger.error(f"Error processing meta key {meta_key}: {str(e)}")
             
-            return results
+            # Apply additional filters
+            filtered_results = []
+            for meta in all_results:
+                # Apply size filters
+                if min_size is not None and meta.get("size", 0) < min_size:
+                    continue
+                
+                if max_size is not None and meta.get("size", 0) > max_size:
+                    continue
+                
+                # Date filters
+                created = meta.get("created")
+                if created_after and created and created < created_after:
+                    continue
+                
+                if created_before and created and created > created_before:
+                    continue
+                
+                filtered_results.append(meta)
+            
+            self.logger.debug(f"Query returned {len(filtered_results)} results after filtering")
+            return filtered_results
         except redis.RedisError as e:
             self.logger.error(f"Redis error in query_metadata: {str(e)}")
             return []

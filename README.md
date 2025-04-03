@@ -233,20 +233,57 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 This project uses GitHub Actions for continuous integration. Every push to the main branch and every pull request will trigger the test suite to run against multiple Python versions.
 
-### Running Tests Locally
+### Running Tests
 
-To run the tests locally:
+Para rodar os testes localmente:
 
 ```bash
-# Run all tests
+# Rodar todos os testes
 make test-all
 
-# Run tests with coverage report
+# Rodar testes com relatório de cobertura
 make test-cov
 
-# Run only filesystem tests
+# Rodar apenas testes do sistema de arquivos
 make test-fs
 
-# Run only Redis tests
+# Rodar apenas testes do Redis
+make test-redis
+
+# Rodar apenas testes dos backends de armazenamento
+make test-backends
+```
+
+### Redis Tests
+
+Os testes do Redis **necessitam de um servidor Redis rodando** em `localhost:6379`. Se o Redis não estiver disponível, os testes **falharão** (diferente das versões anteriores onde os testes eram pulados).
+
+Para instalar o Redis:
+
+- **macOS**: `brew install redis && brew services start redis`
+- **Ubuntu/Debian**: `sudo apt-get install redis-server && sudo systemctl start redis`
+- **Windows**: Instale via WSL ou use o Chocolatey
+
+Você pode rodar os testes do Redis com:
+
+```bash
 make test-redis
 ```
+
+## Development
+
+Para contribuir com o desenvolvimento do pacote:
+
+1. Clone o repositório
+2. Instale as dependências de desenvolvimento:
+   ```bash
+   pip install -e ".[dev]"
+   ```
+3. Para suporte a Redis, instale:
+   ```bash
+   pip install -e ".[redis]"
+   ```
+4. Para todos os extras:
+   ```bash
+   pip install -e ".[dev,redis]"
+   ```

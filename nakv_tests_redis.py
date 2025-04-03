@@ -7,21 +7,14 @@ import threading
 import random
 import tempfile
 from datetime import datetime, timedelta
+import redis
+import uuid
+from typing import Dict, List, Any, Optional
 
-# Check if Redis is available
-try:
-    import redis
-    REDIS_AVAILABLE = True
-    # Test connection
-    try:
-        r = redis.Redis(host='localhost', port=6379, db=0)
-        r.ping()
-    except (redis.ConnectionError, redis.exceptions.ConnectionError):
-        REDIS_AVAILABLE = False
-except ImportError:
-    REDIS_AVAILABLE = False
-
-pytestmark = pytest.mark.skipif(not REDIS_AVAILABLE, reason="Redis server not available")
+# Importar Redis - sem tratamento de erro para falta de conexão
+r = redis.Redis(host='localhost', port=6379, db=0, socket_timeout=2.0)
+# Tentar executar um ping para testar a conexão - se falhar, o teste quebra
+r.ping()
 
 # Try to import from the installed package, fall back to direct import
 try:
@@ -30,6 +23,9 @@ except ImportError:
     # Direct import from current directory
     from nakv import KeyValueStore, KeyValueSync, KeyValueMetadata
     from nakv import PerformanceMetrics
+
+from nadb import NodeAdaptiveDB, StorageBackend
+from storage_backends.redis import RedisStorage
 
 @pytest.fixture
 def kv_sync():
@@ -80,13 +76,158 @@ def binary_data():
     # Create some sample binary data (simulating an image)
     return bytes([0x89, 0x50, 0x4E, 0x47] + [i % 256 for i in range(1000)])
 
-def test_redis_connection():
-    """Simple test to verify Redis connection is working."""
-    assert REDIS_AVAILABLE, "Redis should be available for these tests"
+@pytest.fixture
+def redis_db():
+    """
+    Fixture que configura um banco de dados Redis para testes e faz limpeza
+    antes e depois de cada teste
+    """
+    # Configurar o backend Redis
+    redis_backend = RedisStorage(host='localhost', port=6379, db=15)  # Usar o BD 15 para testes
     
-    # Create a new connection and verify it works
-    r = redis.Redis(host='localhost', port=6379, db=0)
-    assert r.ping(), "Redis connection should be working"
+    # Limpar todos os dados antes do teste
+    keys = redis_backend.redis.keys("nadb:*")
+    if keys:
+        redis_backend.redis.delete(*keys)
+    
+    # Criar instância do NADB com backend Redis
+    db = NodeAdaptiveDB(backend=redis_backend)
+    
+    yield db
+    
+    # Limpar todos os dados após o teste
+    keys = redis_backend.redis.keys("nadb:*")
+    if keys:
+        redis_backend.redis.delete(*keys)
+    redis_backend.close_connections()
+
+def test_redis_connection():
+    """Verifica a conexão com o Redis e fornece diagnóstico se falhar."""
+    try:
+        # Tentar conectar ao Redis
+        client = redis.Redis(host='localhost', port=6379, db=0, socket_timeout=2.0)
+        result = client.ping()
+        
+        # Diagnóstico do servidor Redis
+        info = client.info()
+        print(f"\nRedis diagnostics:")
+        print(f"Redis version: {info.get('redis_version')}")
+        print(f"Connected clients: {info.get('connected_clients')}")
+        print(f"Used memory: {info.get('used_memory_human')}")
+        
+        assert result, "Redis não respondeu ao ping"
+    except redis.ConnectionError as e:
+        pytest.fail(f"Não foi possível conectar ao Redis: {str(e)}")
+    except Exception as e:
+        pytest.fail(f"Erro inesperado ao conectar ao Redis: {str(e)}")
+
+def test_redis_basic_operations(redis_db):
+    """Testa operações básicas do Redis com a instância NADB."""
+    # Dados de teste
+    test_key = str(uuid.uuid4())
+    test_data = {"test": "data", "number": 123}
+    
+    # Salvar dados
+    redis_db.set(test_key, test_data)
+    
+    # Recuperar dados
+    retrieved = redis_db.get(test_key)
+    
+    # Verificar igualdade
+    assert retrieved == test_data
+    
+    # Excluir dado
+    redis_db.delete(test_key)
+    
+    # Verificar que foi excluído
+    assert redis_db.get(test_key) is None
+
+def test_redis_tags(redis_db):
+    """Testa operações com tags no Redis."""
+    # Dados de teste
+    items = [
+        {"id": "item1", "tags": ["tag1", "tag2"], "data": {"value": 1}},
+        {"id": "item2", "tags": ["tag2", "tag3"], "data": {"value": 2}},
+        {"id": "item3", "tags": ["tag1", "tag3"], "data": {"value": 3}}
+    ]
+    
+    # Salvar itens
+    for item in items:
+        redis_db.set(item["id"], item["data"], tags=item["tags"])
+    
+    # Consultar por tag1
+    tag1_results = redis_db.query(tags=["tag1"])
+    assert len(tag1_results) == 2
+    
+    # Verificar IDs retornados
+    tag1_ids = [item["key"] for item in tag1_results]
+    assert "item1" in tag1_ids
+    assert "item3" in tag1_ids
+    
+    # Consultar por tag2 e tag3 (operador AND)
+    tag23_results = redis_db.query(tags=["tag2", "tag3"])
+    assert len(tag23_results) == 1
+    assert tag23_results[0]["key"] == "item2"
+
+def test_redis_ttl(redis_db):
+    """Testa o mecanismo de TTL (Time To Live) no Redis."""
+    # Dados de teste
+    test_key = str(uuid.uuid4())
+    test_data = {"test": "ttl_data"}
+    
+    # Salvar com TTL curto (2 segundos)
+    redis_db.set(test_key, test_data, ttl=2)
+    
+    # Verificar que existe
+    assert redis_db.get(test_key) == test_data
+    
+    # Esperar o TTL expirar
+    time.sleep(3)
+    
+    # Verificar que foi removido
+    assert redis_db.get(test_key) is None
+
+def test_redis_query_filter(redis_db):
+    """Testa filtros de consulta no Redis."""
+    # Dados de teste
+    items = [
+        {
+            "id": "user1", 
+            "data": {"name": "Alice", "age": 25, "active": True},
+            "tags": ["user", "active"]
+        },
+        {
+            "id": "user2", 
+            "data": {"name": "Bob", "age": 30, "active": False},
+            "tags": ["user", "inactive"]
+        },
+        {
+            "id": "user3", 
+            "data": {"name": "Charlie", "age": 22, "active": True},
+            "tags": ["user", "active"]
+        }
+    ]
+    
+    # Salvar itens
+    for item in items:
+        redis_db.set(item["id"], item["data"], tags=item["tags"])
+    
+    # Consultar usuários ativos
+    active_results = redis_db.query(tags=["user", "active"])
+    assert len(active_results) == 2
+    
+    # Verificar nomes dos usuários ativos
+    active_users = [redis_db.get(item["key"]) for item in active_results]
+    active_names = [user["name"] for user in active_users]
+    assert "Alice" in active_names
+    assert "Charlie" in active_names
+    assert "Bob" not in active_names
+    
+    # Consultar usuários inativos
+    inactive_results = redis_db.query(tags=["user", "inactive"])
+    assert len(inactive_results) == 1
+    inactive_user = redis_db.get(inactive_results[0]["key"])
+    assert inactive_user["name"] == "Bob"
 
 def test_set_and_get_text(kv_store):
     text_data = "Hello, world!".encode('utf-8')
