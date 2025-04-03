@@ -32,6 +32,7 @@ clean:
 	rm -rf .pytest_cache/
 	rm -rf .coverage
 	rm -rf htmlcov/
+	rm -rf data/
 	find . -name '*.pyc' -delete
 	find . -name '__pycache__' -delete
 
