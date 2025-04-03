@@ -27,8 +27,14 @@ A simple, thread-safe, zero external dependencies key-value store with asynchron
 ## Installation
 
 ```bash
+# Basic installation
 pip install nadb
+
+# Installation with Redis support
+pip install nadb[redis]
 ```
+
+The basic installation includes only the filesystem backend. If you want to use the Redis backend, you need to install the package with Redis support as shown above.
 
 ## Quickstart
 
