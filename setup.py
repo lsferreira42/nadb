@@ -14,7 +14,7 @@ setup(
     # Using explicit module name instead of package directory
     py_modules=['nakv'],  # Main module is nakv.py
     name='nadb',
-    version='0.1.2',  # Updated version for the enhanced features
+    version='0.1.3',  # Updated version for the enhanced features
     install_requires=[],
     extras_require={
         'redis': ['redis>=3.5.0'],  # Optional Redis dependency
