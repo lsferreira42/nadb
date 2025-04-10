@@ -13,8 +13,12 @@ with open('README.md', 'r', encoding='utf-8') as f:
 setup(
     # Using explicit module name instead of package directory
     py_modules=['nakv'],  # Main module is nakv.py
+    
+    # Create an alias so import nadb works
+    packages=['nadb', 'storage_backends'],
+    
     name='nadb',
-    version='0.1.4',
+    version='0.1.5',
     install_requires=[],
     extras_require={
         'redis': ['redis>=3.5.0'],  # Optional Redis dependency
@@ -30,7 +34,7 @@ setup(
     url='https://github.com/lsferreira42/nadb',
     package_data=package_data,
     include_package_data=True,
-    packages=find_packages(),  # Make sure storage_backends is included
+    # packages=find_packages(),  # Make sure storage_backends is included
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
