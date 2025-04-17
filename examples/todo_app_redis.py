@@ -7,9 +7,57 @@ import json
 import atexit
 import re # For UUID validation
 import functools # Needed for decorator
+import time # For cache expiration
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for, abort # Added abort
 from nadb import KeyValueStore, KeyValueSync
 import traceback # For better error logging
+
+# --- Cache Implementation ---
+def cache_decorator(ttl=300):  # Time to live in seconds (default 5 minutes)
+    """
+    A decorator to cache function results in memory.
+    Especially useful for frequently accessed data that doesn't change often.
+    """
+    def decorator(func):
+        cache = {}
+        
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Create a cache key from function name and arguments
+            key = f"{func.__name__}:{str(args)}:{str(kwargs)}"
+            
+            # Check if result is in cache and not expired
+            current_time = time.time()
+            if key in cache and current_time - cache[key]['timestamp'] < ttl:
+                return cache[key]['result']
+            
+            # If not in cache or expired, call the function
+            result = func(*args, **kwargs)
+            
+            # Store in cache with timestamp
+            cache[key] = {
+                'result': result,
+                'timestamp': current_time
+            }
+            
+            return result
+        
+        # Add function to clear specific cache entries
+        def clear_cache_for_args(*args, **kwargs):
+            key = f"{func.__name__}:{str(args)}:{str(kwargs)}"
+            if key in cache:
+                del cache[key]
+                
+        wrapper.clear_cache_for_args = clear_cache_for_args
+        
+        # Add function to clear entire cache
+        def clear_all_cache():
+            cache.clear()
+            
+        wrapper.clear_all_cache = clear_all_cache
+        
+        return wrapper
+    return decorator
 
 # --- NADB Setup ---
 # Initialize synchronization engine (runs in background)
@@ -53,6 +101,7 @@ def get_task_key(list_uuid, task_id):
 def get_subtask_key(list_uuid, subtask_id):
     return f"{generate_list_key_prefix(list_uuid)}subtask:{subtask_id}"
 
+@cache_decorator(ttl=60)  # Cache list keys for 1 minute
 def get_all_list_keys(list_uuid):
     """Retrieves all NADB keys (tasks and subtasks) for a specific list UUID."""
     key_prefix = generate_list_key_prefix(list_uuid)
@@ -70,10 +119,12 @@ def get_all_list_keys(list_uuid):
     return all_keys
 
 # CORRECTED Helper to check list existence efficiently
+@cache_decorator(ttl=30)  # Cache list existence for 30 seconds
 def check_list_exists(list_uuid):
     """Checks if any key exists for the given list UUID."""
     return bool(get_all_list_keys(list_uuid))
 
+@cache_decorator(ttl=10)  # Cache tasks with subtasks for 10 seconds
 def get_all_tasks_with_subtasks(list_uuid):
     """Retrieves all tasks and resolves their subtasks for a specific list."""
     all_tasks = {}
@@ -191,6 +242,11 @@ def save_task(list_uuid, task_data):
         tags = ["task", f"list:{list_uuid}"]
         kv_store.set(key, value, tags=tags)
         print(f"Saved task: {key}")
+        
+        # Clear relevant caches
+        get_all_tasks_with_subtasks.clear_cache_for_args(list_uuid)
+        get_all_list_keys.clear_cache_for_args(list_uuid)
+        
         return task_data
     except Exception as e:
         print(f"Error saving task {key}: {e}")
@@ -207,6 +263,11 @@ def save_subtask(list_uuid, subtask_data):
         tags = ["subtask", f"list:{list_uuid}", f"parent:{parent_task_id}"]
         kv_store.set(key, value, tags=tags)
         print(f"Saved subtask: {key}")
+        
+        # Clear relevant caches
+        get_all_tasks_with_subtasks.clear_cache_for_args(list_uuid)
+        get_all_list_keys.clear_cache_for_args(list_uuid)
+        
         return subtask_data
     except Exception as e:
         print(f"Error saving subtask {key}: {e}")
@@ -218,6 +279,11 @@ def delete_task_data(list_uuid, task_id):
     try:
         kv_store.delete(key)
         print(f"Deleted task: {key}")
+        
+        # Clear relevant caches
+        get_all_tasks_with_subtasks.clear_cache_for_args(list_uuid)
+        get_all_list_keys.clear_cache_for_args(list_uuid)
+        
     except Exception as e:
         print(f"Error deleting task {key}: {e}")
         raise
@@ -228,6 +294,11 @@ def delete_subtask_data(list_uuid, subtask_id):
     try:
         kv_store.delete(key)
         print(f"Deleted subtask: {key}")
+        
+        # Clear relevant caches
+        get_all_tasks_with_subtasks.clear_cache_for_args(list_uuid)
+        get_all_list_keys.clear_cache_for_args(list_uuid)
+        
     except Exception as e:
         print(f"Error deleting subtask {key}: {e}")
         raise
