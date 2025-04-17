@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import redis
 import uuid
 from typing import Dict, List, Any, Optional
+import shutil
 
 # Importar Redis - sem tratamento de erro para falta de conexão
 r = redis.Redis(host='localhost', port=6379, db=0, socket_timeout=2.0)
@@ -24,7 +25,6 @@ except ImportError:
     from nakv import KeyValueStore, KeyValueSync, KeyValueMetadata
     from nakv import PerformanceMetrics
 
-from nadb import NodeAdaptiveDB, StorageBackend
 from storage_backends.redis import RedisStorage
 
 @pytest.fixture
@@ -77,29 +77,44 @@ def binary_data():
     return bytes([0x89, 0x50, 0x4E, 0x47] + [i % 256 for i in range(1000)])
 
 @pytest.fixture
-def redis_db():
+def redis_db(kv_sync):
     """
     Fixture que configura um banco de dados Redis para testes e faz limpeza
     antes e depois de cada teste
     """
+    # Create a temp directory for KeyValueStore
+    temp_dir = tempfile.mkdtemp(prefix="nadb_redis_test_")
+    
     # Configurar o backend Redis
-    redis_backend = RedisStorage(host='localhost', port=6379, db=15)  # Usar o BD 15 para testes
+    redis_backend_name = "redis"
     
-    # Limpar todos os dados antes do teste
-    keys = redis_backend.redis.keys("nadb:*")
+    # Limpar todos os dados Redis antes do teste
+    redis_conn = redis.Redis(host='localhost', port=6379, db=15)  # Usar o BD 15 para testes
+    keys = redis_conn.keys("nadb:*")
     if keys:
-        redis_backend.redis.delete(*keys)
+        redis_conn.delete(*keys)
     
-    # Criar instância do NADB com backend Redis
-    db = NodeAdaptiveDB(backend=redis_backend)
+    # Criar instância do KeyValueStore com backend Redis
+    db = KeyValueStore(
+        data_folder_path=temp_dir,
+        db="redis_test", 
+        buffer_size_mb=1,
+        namespace="test", 
+        sync=kv_sync,
+        compression_enabled=True,
+        storage_backend=redis_backend_name
+    )
+    
+    # Clear any existing data
+    db.flushdb()
     
     yield db
     
     # Limpar todos os dados após o teste
-    keys = redis_backend.redis.keys("nadb:*")
-    if keys:
-        redis_backend.redis.delete(*keys)
-    redis_backend.close_connections()
+    db.flushdb()
+    
+    # Clean up temp directory
+    shutil.rmtree(temp_dir, ignore_errors=True)
 
 def test_redis_connection():
     """Verifica a conexão com o Redis e fornece diagnóstico se falhar."""
@@ -122,10 +137,10 @@ def test_redis_connection():
         pytest.fail(f"Erro inesperado ao conectar ao Redis: {str(e)}")
 
 def test_redis_basic_operations(redis_db):
-    """Testa operações básicas do Redis com a instância NADB."""
+    """Testa operações básicas do Redis com a instância KeyValueStore."""
     # Dados de teste
     test_key = str(uuid.uuid4())
-    test_data = {"test": "data", "number": 123}
+    test_data = json.dumps({"test": "data", "number": 123}).encode('utf-8')
     
     # Salvar dados
     redis_db.set(test_key, test_data)
@@ -140,15 +155,16 @@ def test_redis_basic_operations(redis_db):
     redis_db.delete(test_key)
     
     # Verificar que foi excluído
-    assert redis_db.get(test_key) is None
+    with pytest.raises(KeyError):
+        redis_db.get(test_key)
 
 def test_redis_tags(redis_db):
     """Testa operações com tags no Redis."""
     # Dados de teste
     items = [
-        {"id": "item1", "tags": ["tag1", "tag2"], "data": {"value": 1}},
-        {"id": "item2", "tags": ["tag2", "tag3"], "data": {"value": 2}},
-        {"id": "item3", "tags": ["tag1", "tag3"], "data": {"value": 3}}
+        {"id": "item1", "tags": ["tag1", "tag2"], "data": json.dumps({"value": 1}).encode('utf-8')},
+        {"id": "item2", "tags": ["tag2", "tag3"], "data": json.dumps({"value": 2}).encode('utf-8')},
+        {"id": "item3", "tags": ["tag1", "tag3"], "data": json.dumps({"value": 3}).encode('utf-8')}
     ]
     
     # Salvar itens
@@ -156,27 +172,27 @@ def test_redis_tags(redis_db):
         redis_db.set(item["id"], item["data"], tags=item["tags"])
     
     # Consultar por tag1
-    tag1_results = redis_db.query(tags=["tag1"])
+    tag1_results = redis_db.query_by_tags(["tag1"])
     assert len(tag1_results) == 2
     
     # Verificar IDs retornados
-    tag1_ids = [item["key"] for item in tag1_results]
+    tag1_ids = list(tag1_results.keys())
     assert "item1" in tag1_ids
     assert "item3" in tag1_ids
     
     # Consultar por tag2 e tag3 (operador AND)
-    tag23_results = redis_db.query(tags=["tag2", "tag3"])
+    tag23_results = redis_db.query_by_tags(["tag2", "tag3"])
     assert len(tag23_results) == 1
-    assert tag23_results[0]["key"] == "item2"
+    assert "item2" in tag23_results
 
 def test_redis_ttl(redis_db):
     """Testa o mecanismo de TTL (Time To Live) no Redis."""
     # Dados de teste
     test_key = str(uuid.uuid4())
-    test_data = {"test": "ttl_data"}
+    test_data = json.dumps({"test": "ttl_data"}).encode('utf-8')
     
     # Salvar com TTL curto (2 segundos)
-    redis_db.set(test_key, test_data, ttl=2)
+    redis_db.set_with_ttl(test_key, test_data, 2)
     
     # Verificar que existe
     assert redis_db.get(test_key) == test_data
@@ -184,8 +200,12 @@ def test_redis_ttl(redis_db):
     # Esperar o TTL expirar
     time.sleep(3)
     
-    # Verificar que foi removido
-    assert redis_db.get(test_key) is None
+    # Trigger cleanup of expired keys
+    redis_db.cleanup_expired()
+    
+    # Verificar que foi removido - should raise KeyError
+    with pytest.raises(KeyError):
+        redis_db.get(test_key)
 
 def test_redis_query_filter(redis_db):
     """Testa filtros de consulta no Redis."""
@@ -193,17 +213,17 @@ def test_redis_query_filter(redis_db):
     items = [
         {
             "id": "user1", 
-            "data": {"name": "Alice", "age": 25, "active": True},
+            "data": json.dumps({"name": "Alice", "age": 25, "active": True}).encode('utf-8'),
             "tags": ["user", "active"]
         },
         {
             "id": "user2", 
-            "data": {"name": "Bob", "age": 30, "active": False},
+            "data": json.dumps({"name": "Bob", "age": 30, "active": False}).encode('utf-8'),
             "tags": ["user", "inactive"]
         },
         {
             "id": "user3", 
-            "data": {"name": "Charlie", "age": 22, "active": True},
+            "data": json.dumps({"name": "Charlie", "age": 22, "active": True}).encode('utf-8'),
             "tags": ["user", "active"]
         }
     ]
@@ -213,21 +233,19 @@ def test_redis_query_filter(redis_db):
         redis_db.set(item["id"], item["data"], tags=item["tags"])
     
     # Consultar usuários ativos
-    active_results = redis_db.query(tags=["user", "active"])
+    active_results = redis_db.query_by_tags(["user", "active"])
     assert len(active_results) == 2
     
-    # Verificar nomes dos usuários ativos
-    active_users = [redis_db.get(item["key"]) for item in active_results]
-    active_names = [user["name"] for user in active_users]
-    assert "Alice" in active_names
-    assert "Charlie" in active_names
-    assert "Bob" not in active_names
+    # Get keys
+    active_keys = list(active_results.keys())
+    assert "user1" in active_keys
+    assert "user3" in active_keys
+    assert "user2" not in active_keys
     
     # Consultar usuários inativos
-    inactive_results = redis_db.query(tags=["user", "inactive"])
+    inactive_results = redis_db.query_by_tags(["user", "inactive"])
     assert len(inactive_results) == 1
-    inactive_user = redis_db.get(inactive_results[0]["key"])
-    assert inactive_user["name"] == "Bob"
+    assert "user2" in inactive_results
 
 def test_set_and_get_text(kv_store):
     text_data = "Hello, world!".encode('utf-8')
