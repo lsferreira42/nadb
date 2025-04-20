@@ -312,64 +312,211 @@ LANDING_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Welcome to Multi-List TODO</title>
+    <title>TaskFlow - Modern ToDo App</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 100vh; background-color: #f8f9fa; text-align: center; padding: 20px; }
-        .content { background-color: #fff; padding: 40px; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); margin-bottom: 30px; max-width: 500px; width: 100%; }
-        h1 { color: #007bff; margin-bottom: 15px; }
-        h2 { color: #6c757d; margin-top: 30px; margin-bottom: 15px; font-size: 1.2rem; }
-        p { color: #6c757d; margin-bottom: 25px; }
-        .action-form { margin-bottom: 15px; }
-        .action-button {
-            background-color: #28a745;
+        :root {
+            --primary: #4361ee;
+            --primary-dark: #3a56d4;
+            --secondary: #4cc9f0;
+            --success: #06d6a0;
+            --warning: #ffd166;
+            --danger: #ef476f;
+            --light: #f8f9fa;
+            --dark: #212529;
+            --gray: #6c757d;
+            --shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            --border-radius: 8px;
+            --transition: all 0.3s ease;
+        }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, sans-serif;
+            color: var(--dark);
+            background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background-color: white;
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            width: 100%;
+            max-width: 500px;
+            overflow: hidden;
+            position: relative;
+        }
+        
+        .header {
+            background: linear-gradient(to right, var(--primary), var(--secondary));
             color: white;
-            padding: 12px 25px;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        .header h1 {
+            font-size: 2.2rem;
+            margin-bottom: 5px;
+            font-weight: 600;
+        }
+        
+        .header p {
+            opacity: 0.9;
+            font-size: 1rem;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .section {
+            margin-bottom: 25px;
+        }
+        
+        .section-title {
+            color: var(--gray);
+            font-size: 1.1rem;
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .section-title i {
+            margin-right: 8px;
+            color: var(--primary);
+        }
+        
+        .action-button {
+            display: inline-block;
+            background-color: var(--primary);
+            color: white;
             border: none;
-            border-radius: 5px;
+            border-radius: var(--border-radius);
+            padding: 12px 25px;
             font-size: 1rem;
             cursor: pointer;
+            transition: var(--transition);
+            text-align: center;
             text-decoration: none;
-            transition: background-color 0.2s ease;
-            display: inline-block; /* Fit content */
+            width: 100%;
+            font-weight: 500;
         }
-        .action-button:hover { background-color: #218838; }
-        .join-form input[type="text"] {
-            padding: 10px;
-            border: 1px solid #ced4da;
-            border-radius: 5px;
-            margin-right: 5px;
+        
+        .action-button:hover {
+            background-color: var(--primary-dark);
+            transform: translateY(-2px);
+            box-shadow: var(--shadow);
+        }
+        
+        .join-form {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .join-form input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid #ddd;
+            border-radius: var(--border-radius);
             font-size: 1rem;
-            width: calc(100% - 110px); /* Adjust width considering button */
-            max-width: 300px;
+            transition: var(--transition);
         }
+        
+        .join-form input:focus {
+            border-color: var(--primary);
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.2);
+        }
+        
         .join-form button {
-             background-color: #007bff;
-             padding: 10px 15px;
-             font-size: 1rem;
-             /* other styles same as .action-button */
-             color: white; border: none; border-radius: 5px; cursor: pointer; transition: background-color 0.2s ease;
+            background-color: var(--secondary);
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 12px 15px;
+            cursor: pointer;
+            transition: var(--transition);
+            font-weight: 500;
         }
-         .join-form button:hover { background-color: #0056b3; }
-         .error-message { color: #dc3545; margin-top: 10px; font-weight: bold; height: 1.2em; /* Reserve space */}
+        
+        .join-form button:hover {
+            opacity: 0.9;
+            transform: translateY(-2px);
+        }
+        
+        .error-message {
+            color: var(--danger);
+            margin-top: 10px;
+            font-size: 0.9rem;
+            min-height: 20px;
+        }
+        
+        .footer {
+            text-align: center;
+            padding: 15px;
+            color: var(--gray);
+            font-size: 0.85rem;
+            border-top: 1px solid #eee;
+        }
+        
+        @media (max-width: 576px) {
+            .container {
+                max-width: 100%;
+            }
+            
+            .header {
+                padding: 20px;
+            }
+            
+            .content {
+                padding: 20px;
+            }
+            
+            .join-form {
+                flex-direction: column;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="content">
-        <h1>Multi-List TODO App</h1>
-        <p>Powered by NADB & Redis</p>
-
-        <h2>Create a New List</h2>
-        <form action="{{ url_for('create_list') }}" method="post" class="action-form">
-            <button type="submit" class="action-button">Create My TODO List</button>
-        </form>
-
-        <h2>Or Join Existing List</h2>
-        <form id="join-list-form" class="join-form">
-            <input type="text" id="list-id-input" placeholder="Enter List ID (UUID)" required pattern="^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$">
-            <button type="submit">Go to List</button>
-        </form>
-        <div id="join-error" class="error-message"></div>
-
+    <div class="container">
+        <div class="header">
+            <h1>TaskFlow</h1>
+            <p>Powered by NADB & Redis</p>
+        </div>
+        
+        <div class="content">
+            <div class="section">
+                <h2 class="section-title"><i class="fas fa-plus-circle"></i> Create New List</h2>
+                <form action="{{ url_for('create_list') }}" method="post">
+                    <button type="submit" class="action-button">Start Fresh</button>
+                </form>
+            </div>
+            
+            <div class="section">
+                <h2 class="section-title"><i class="fas fa-link"></i> Join Existing List</h2>
+                <form id="join-list-form" class="join-form">
+                    <input type="text" id="list-id-input" placeholder="Enter List ID (UUID)" required pattern="^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$">
+                    <button type="submit"><i class="fas fa-arrow-right"></i></button>
+                </form>
+                <div id="join-error" class="error-message"></div>
+            </div>
+        </div>
+        
+        <div class="footer">
+            &copy; 2023 TaskFlow App | Enterprise-Ready Todo Management
+        </div>
     </div>
 
     <script>
@@ -382,12 +529,12 @@ LANDING_TEMPLATE = """
             const listId = listIdInput.value.trim();
             joinError.textContent = ''; // Clear previous error
 
-            // Basic UUID format validation (HTML5 pattern helps but JS check is good too)
+            // Basic UUID format validation
             const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
             if (!listId) {
                 joinError.textContent = 'Please enter a List ID.';
             } else if (!uuidRegex.test(listId)) {
-                 joinError.textContent = 'Invalid List ID format.';
+                joinError.textContent = 'Invalid List ID format.';
             } else {
                 // Redirect to the list page
                 window.location.href = `/list/${listId}`;
@@ -405,97 +552,458 @@ LIST_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NADB TODO List - {{ list_id[:8] }}...</title> {# Shortened title #}
+    <title>TaskFlow - {{ list_id[:8] }}</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
-        /* CSS remains largely the same */
         :root {
-            --primary-color: #007bff; --light-gray: #f8f9fa; --gray: #e9ecef;
-            --dark-gray: #6c757d; --success-color: #28a745; --danger-color: #dc3545;
-            --border-color: #dee2e6; --background-color: #ffffff; --text-color: #212529;
-            --border-radius: 0.3rem; --box-shadow: 0 0.125rem 0.25rem rgba(0, 0, 0, 0.075);
+            --primary: #4361ee;
+            --primary-dark: #3a56d4;
+            --secondary: #4cc9f0;
+            --success: #06d6a0;
+            --warning: #ffd166;
+            --danger: #ef476f;
+            --light: #f8f9fa;
+            --dark: #212529;
+            --gray: #6c757d;
+            --gray-light: #e9ecef;
+            --border: #dee2e6;
+            --shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            --border-radius: 8px;
+            --transition: all 0.3s ease;
         }
+        
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
         body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; margin: 0;
-            padding: 20px; background-color: var(--light-gray); color: var(--text-color); line-height: 1.5;
+            font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Roboto, Oxygen, Ubuntu, sans-serif;
+            color: var(--dark);
+            background: #f5f7fa;
+            min-height: 100vh;
+            padding: 20px;
         }
-        .container { max-width: 700px; margin: 20px auto; background-color: var(--background-color); padding: 25px; border-radius: var(--border-radius); box-shadow: var(--box-shadow); }
-        h1, h2 { color: var(--primary-color); margin-bottom: 1rem; border-bottom: 1px solid var(--border-color); padding-bottom: 0.5rem; }
-        h1 { font-size: 1.8rem; margin-bottom: 0.25rem; /* Reduce margin */ }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background-color: white;
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+        
+        .header {
+            background: linear-gradient(to right, var(--primary), var(--secondary));
+            color: white;
+            padding: 25px 30px;
+            position: relative;
+        }
+        
+        .header h1 {
+            font-size: 1.8rem;
+            margin-bottom: 10px;
+            font-weight: 600;
+        }
+        
         #list-id-display {
-             font-size: 0.9rem; color: var(--dark-gray); margin-bottom: 1rem; margin-top: 0.25rem;
-             display: flex; align-items: center; flex-wrap: wrap; /* Allow wrapping */
-         }
-        #list-id-display code { background-color: var(--gray); padding: 2px 5px; border-radius: 3px; margin-right: 10px; word-break: break-all; /* Break long IDs */ }
-        #copy-link-btn {
-            background: none; border: none; color: var(--primary-color); cursor: pointer;
-             padding: 0 5px; font-size: 0.9em; margin-left: 5px;
-         }
-         #copy-link-btn:hover { text-decoration: underline; }
-        h2 { font-size: 1.4rem; margin-top: 1.5rem; }
-        ul { list-style: none; padding: 0; }
-        li.task-item, li.subtask-item { margin-bottom: 15px; padding: 15px; border: 1px solid var(--border-color); border-radius: var(--border-radius); background-color: var(--background-color); display: flex; flex-direction: column; transition: background-color 0.2s ease; }
-        li.completed { background-color: #f0f0f0; }
-        li.completed .item-title { text-decoration: line-through; color: var(--dark-gray); }
-        .item-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
-        .item-title { font-size: 1.1rem; font-weight: 500; flex-grow: 1; margin-right: 10px; }
-        .item-actions button { padding: 5px 10px; font-size: 0.85rem; cursor: pointer; border: 1px solid transparent; border-radius: var(--border-radius); margin-left: 5px; transition: background-color 0.2s ease, border-color 0.2s ease; }
-        .item-actions .toggle-btn { background-color: #e0e0e0; border-color: #d0d0d0; }
-        .item-actions .toggle-btn.completed { background-color: var(--success-color); color: white; border-color: var(--success-color); }
-        .item-actions .delete-btn { background-color: #f8d7da; color: var(--danger-color); border-color: #f5c6cb; }
-        .item-actions button:hover { opacity: 0.8; }
-        .subtasks-container { margin-left: 20px; margin-top: 10px; border-left: 3px solid var(--gray); padding-left: 15px; }
-        .subtasks-list li { font-size: 0.95em; margin-bottom: 10px; padding: 10px; }
-        .add-subtask-form { margin-top: 10px; }
-        .add-form { margin-top: 20px; padding: 15px; background-color: var(--light-gray); border: 1px solid var(--border-color); border-radius: var(--border-radius); display: flex; }
-        .add-form input[type="text"] { flex-grow: 1; padding: 10px; margin-right: 10px; border: 1px solid var(--border-color); border-radius: var(--border-radius); font-size: 1rem; }
-        .add-form button { padding: 10px 20px; cursor: pointer; background-color: var(--primary-color); color: white; border: none; border-radius: var(--border-radius); font-size: 1rem; transition: background-color 0.2s ease; }
-        .add-form button:hover { background-color: #0056b3; }
-        .loading { text-align: center; padding: 20px; color: var(--dark-gray); }
-        .error { color: var(--danger-color); font-weight: bold; margin-top: 10px; }
-        .list-actions { margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--border-color); text-align: right; }
-        .delete-list-btn {
-             background-color: var(--danger-color);
-             color: white;
-             padding: 8px 15px;
-             border: none; border-radius: var(--border-radius);
-             font-size: 0.9rem; cursor: pointer; transition: background-color 0.2s ease;
+            font-size: 0.9rem;
+            opacity: 0.9;
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 5px;
         }
-        .delete-list-btn:hover { background-color: #c82333; }
-        footer { margin-top: 1rem; text-align: center; font-size: 0.85rem; color: var(--dark-gray); }
+        
+        #list-id-display code {
+            background-color: rgba(255, 255, 255, 0.2);
+            padding: 3px 8px;
+            border-radius: 4px;
+            margin-left: 5px;
+            margin-right: 10px;
+            font-family: monospace;
+        }
+        
+        #copy-link-btn {
+            background: none;
+            border: none;
+            color: white;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            opacity: 0.9;
+            transition: var(--transition);
+            padding: 0;
+        }
+        
+        #copy-link-btn i {
+            margin-right: 5px;
+        }
+        
+        #copy-link-btn:hover {
+            opacity: 1;
+            text-decoration: underline;
+        }
+        
+        .content {
+            padding: 30px;
+        }
+        
+        .section {
+            margin-bottom: 30px;
+        }
+        
+        .section-title {
+            color: var(--primary);
+            font-size: 1.3rem;
+            margin-bottom: 15px;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+        }
+        
+        .section-title i {
+            margin-right: 8px;
+        }
+        
+        .add-form {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .add-form input {
+            flex: 1;
+            padding: 12px 15px;
+            border: 1px solid var(--border);
+            border-radius: var(--border-radius);
+            font-size: 1rem;
+            transition: var(--transition);
+        }
+        
+        .add-form input:focus {
+            border-color: var(--primary);
+            outline: none;
+            box-shadow: 0 0 0 3px rgba(67, 97, 238, 0.2);
+        }
+        
+        .add-form button {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 12px 20px;
+            cursor: pointer;
+            transition: var(--transition);
+            font-weight: 500;
+        }
+        
+        .add-form button:hover {
+            background-color: var(--primary-dark);
+        }
+        
+        #task-list {
+            list-style: none;
+        }
+        
+        .task-item, .subtask-item {
+            background-color: white;
+            border-radius: var(--border-radius);
+            margin-bottom: 15px;
+            box-shadow: var(--shadow);
+            transition: var(--transition);
+            border-left: 4px solid var(--primary);
+        }
+        
+        .task-item {
+            border-left: 4px solid var(--primary);
+        }
+        
+        .subtask-item {
+            border-left: 4px solid var(--secondary);
+            margin-bottom: 10px;
+        }
+        
+        .task-item.completed, .subtask-item.completed {
+            background-color: var(--light);
+            border-left-color: var(--success);
+        }
+        
+        .task-item.completed .item-title, .subtask-item.completed .item-title {
+            text-decoration: line-through;
+            color: var(--gray);
+        }
+        
+        .item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+        }
+        
+        .item-title {
+            font-weight: 500;
+            flex-grow: 1;
+        }
+        
+        .item-actions {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .item-actions button {
+            background: none;
+            border: none;
+            font-size: 0.9rem;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            padding: 5px 10px;
+            border-radius: 4px;
+            transition: var(--transition);
+        }
+        
+        .item-actions button i {
+            margin-right: 5px;
+        }
+        
+        .toggle-btn {
+            color: var(--primary);
+            background-color: rgba(67, 97, 238, 0.1);
+        }
+        
+        .toggle-btn.completed {
+            color: var(--success);
+            background-color: rgba(6, 214, 160, 0.1);
+        }
+        
+        .delete-btn {
+            color: var(--danger);
+            background-color: rgba(239, 71, 111, 0.1);
+        }
+        
+        .toggle-btn:hover, .delete-btn:hover {
+            opacity: 0.8;
+            transform: translateY(-1px);
+        }
+        
+        .subtasks-container {
+            padding: 0 15px 15px 15px;
+        }
+        
+        .subtasks-list {
+            margin-bottom: 10px;
+            list-style: none;
+        }
+        
+        .add-subtask-form {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .add-subtask-form input {
+            flex: 1;
+            padding: 8px 12px;
+            border: 1px solid var(--border);
+            border-radius: var(--border-radius);
+            font-size: 0.9rem;
+        }
+        
+        .add-subtask-form button {
+            background-color: var(--secondary);
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 8px 12px;
+            cursor: pointer;
+            font-size: 0.9rem;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 20px;
+            color: var(--gray);
+            font-style: italic;
+        }
+        
+        .error {
+            background-color: rgba(239, 71, 111, 0.1);
+            color: var(--danger);
+            padding: 10px 15px;
+            border-radius: var(--border-radius);
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+        }
+        
+        .error i {
+            margin-right: 8px;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 30px;
+            color: var(--gray);
+        }
+        
+        .empty-state i {
+            font-size: 3rem;
+            margin-bottom: 15px;
+            color: var(--gray-light);
+        }
+        
+        .empty-state p {
+            font-size: 1.1rem;
+            margin-bottom: 10px;
+        }
+        
+        .list-actions {
+            margin-top: 30px;
+            padding-top: 20px;
+            border-top: 1px solid var(--gray-light);
+            display: flex;
+            justify-content: flex-end;
+        }
+        
+        .delete-list-btn {
+            background-color: var(--danger);
+            color: white;
+            border: none;
+            border-radius: var(--border-radius);
+            padding: 10px 15px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            transition: var(--transition);
+        }
+        
+        .delete-list-btn i {
+            margin-right: 5px;
+        }
+        
+        .delete-list-btn:hover {
+            background-color: #e63e65;
+            transform: translateY(-1px);
+        }
+        
+        .footer {
+            padding: 15px 30px;
+            text-align: center;
+            color: var(--gray);
+            font-size: 0.85rem;
+            border-top: 1px solid var(--gray-light);
+            background-color: var(--light);
+        }
+        
+        /* Toast notification for copy success */
+        .toast {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            background-color: var(--success);
+            color: white;
+            padding: 12px 20px;
+            border-radius: var(--border-radius);
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: center;
+            opacity: 0;
+            transform: translateY(-20px);
+            transition: all 0.3s ease;
+            z-index: 1000;
+        }
+        
+        .toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        
+        .toast i {
+            margin-right: 8px;
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                max-width: 100%;
+                margin: 0;
+            }
+            
+            .header, .content {
+                padding: 20px;
+            }
+            
+            .item-header {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+            
+            .item-actions {
+                margin-top: 10px;
+                width: 100%;
+                justify-content: flex-end;
+            }
+        }
     </style>
 </head>
-<body data-list-id="{{ list_id }}"> {# Pass list_id to JS via data attribute #}
+<body data-list-id="{{ list_id }}">
     <div class="container">
-        <h1>TODO List</h1>
-        {# Display List ID and Copy Button #}
-        <div id="list-id-display">
-            List ID: <code>{{ list_id }}</code>
-            <button id="copy-link-btn" title="Copy list URL">Copy Link</button>
+        <div class="header">
+            <h1>TaskFlow</h1>
+            <div id="list-id-display">
+                List ID: <code>{{ list_id }}</code>
+                <button id="copy-link-btn" title="Copy list URL">
+                    <i class="fas fa-copy"></i> Copy Link
+                </button>
+            </div>
         </div>
-
-        <h2>Add New Task</h2>
-        <form id="add-task-form" class="add-form">
-            <input type="text" name="title" placeholder="What needs to be done?" required>
-            <button type="submit">Add Task</button>
-        </form>
-        <div id="error-message" class="error" style="display: none;"></div>
-
-        <h2>Tasks</h2>
-        <div id="task-list-container">
-            <div id="loading-tasks" class="loading">Loading tasks...</div>
-            <ul id="task-list">
-                <!-- Tasks will be loaded here by JavaScript -->
-            </ul>
+        
+        <div class="content">
+            <div id="error-message" class="error" style="display: none;">
+                <i class="fas fa-exclamation-circle"></i>
+                <span id="error-text"></span>
+            </div>
+            
+            <div class="section">
+                <h2 class="section-title"><i class="fas fa-plus"></i> Add New Task</h2>
+                <form id="add-task-form" class="add-form">
+                    <input type="text" name="title" placeholder="What needs to be done?" required>
+                    <button type="submit">Add Task</button>
+                </form>
+            </div>
+            
+            <div class="section">
+                <h2 class="section-title"><i class="fas fa-tasks"></i> Tasks</h2>
+                <div id="task-list-container">
+                    <div id="loading-tasks" class="loading">
+                        <i class="fas fa-spinner fa-spin"></i> Loading tasks...
+                    </div>
+                    <ul id="task-list">
+                        <!-- Tasks will be loaded here by JavaScript -->
+                    </ul>
+                </div>
+            </div>
+            
+            <div class="list-actions">
+                <button id="delete-list-btn" class="delete-list-btn">
+                    <i class="fas fa-trash-alt"></i> Delete This List
+                </button>
+            </div>
         </div>
+        
+        <div class="footer">
+            Powered by NADB & Redis | &copy; 2023 TaskFlow
+        </div>
+    </div>
 
-         {# List Actions - Delete List #}
-         <div class="list-actions">
-             <button id="delete-list-btn" class="delete-list-btn">Delete This List</button>
-         </div>
-
-         <footer>
-             NADB Backend: {{ kv_store.storage.__class__.__name__ }} | DB: {{ kv_store.db }} | Namespace: {{ kv_store.namespace }}
-         </footer>
+    <!-- Toast notification -->
+    <div id="toast" class="toast">
+        <i class="fas fa-check-circle"></i>
+        <span id="toast-message">Link copied to clipboard!</span>
     </div>
 
     <script>
@@ -506,24 +1014,53 @@ LIST_TEMPLATE = """
         const addTaskForm = document.getElementById('add-task-form');
         const loadingIndicator = document.getElementById('loading-tasks');
         const errorMessageDiv = document.getElementById('error-message');
+        const errorText = document.getElementById('error-text');
         const copyLinkBtn = document.getElementById('copy-link-btn');
         const deleteListBtn = document.getElementById('delete-list-btn');
+        const toast = document.getElementById('toast');
+        const toastMessage = document.getElementById('toast-message');
+
+        // --- Toast Notification ---
+        function showToast(message, duration = 3000) {
+            toastMessage.textContent = message;
+            toast.classList.add('show');
+            setTimeout(() => {
+                toast.classList.remove('show');
+            }, duration);
+        }
 
         // --- API Helper (remains the same) ---
         async function apiRequest(endpoint, method = 'GET', data = null) {
             const url = `/api/list/${LIST_ID}${endpoint}`;
-            const options = { method: method, headers: { 'Content-Type': 'application/json', }, };
-            if (data) { options.body = JSON.stringify(data); }
+            const options = { 
+                method: method, 
+                headers: { 'Content-Type': 'application/json' }
+            };
+            
+            if (data) { 
+                options.body = JSON.stringify(data); 
+            }
+            
             try {
                 const response = await fetch(url, options);
+                
                 if (!response.ok) {
-                    const errorData = await response.json().catch(() => ({ message: `HTTP error! status: ${response.status}` }));
+                    const errorData = await response.json().catch(() => ({ 
+                        message: `HTTP error! status: ${response.status}` 
+                    }));
                     throw new Error(errorData.message || `Request failed with status ${response.status}`);
                 }
-                 // Handle 204 No Content for DELETE
-                if (method === 'DELETE' && response.status === 204) { return { success: true }; }
-                // Handle potential 204 No Content for GET (if list becomes empty after loading)
-                 if (method === 'GET' && response.status === 204) { return []; }
+                
+                // Handle 204 No Content for DELETE
+                if (method === 'DELETE' && response.status === 204) { 
+                    return { success: true }; 
+                }
+                
+                // Handle potential 204 No Content for GET
+                if (method === 'GET' && response.status === 204) { 
+                    return []; 
+                }
+                
                 return await response.json();
             } catch (error) {
                 console.error('API Request Error:', url, method, error);
@@ -532,63 +1069,100 @@ LIST_TEMPLATE = """
             }
         }
 
-        // --- Error Handling (remains the same) ---
+        // --- Error Handling (improved) ---
         function showError(message) {
-            errorMessageDiv.textContent = `Error: ${message}`;
-            errorMessageDiv.style.display = 'block';
-            setTimeout(() => { errorMessageDiv.style.display = 'none'; }, 5000);
+            errorText.textContent = message;
+            errorMessageDiv.style.display = 'flex';
+            setTimeout(() => { 
+                errorMessageDiv.style.display = 'none'; 
+            }, 5000);
         }
 
-        // --- Rendering Functions (remain the same) ---
+        // --- Rendering Functions (improved) ---
         function renderTask(task) {
             const subtasksHtml = (task.subtasks_resolved || []).map(renderSubtask).join('');
             const li = document.createElement('li');
             li.id = `task-${task.id}`;
-            li.className = `task-item ${task.completed ? 'completed' : ''}`; li.dataset.taskId = task.id;
+            li.className = `task-item ${task.completed ? 'completed' : ''}`;
+            li.dataset.taskId = task.id;
+            
             li.innerHTML = `
                 <div class="item-header">
                     <span class="item-title">${escapeHTML(task.title)}</span>
                     <div class="item-actions">
-                        <button class="toggle-btn ${task.completed ? 'completed' : ''}" data-action="toggle">${task.completed ? 'Undo' : 'Complete'}</button>
-                        <button class="delete-btn" data-action="delete">Delete</button>
+                        <button class="toggle-btn ${task.completed ? 'completed' : ''}" data-action="toggle">
+                            <i class="fas ${task.completed ? 'fa-undo' : 'fa-check'}"></i>
+                            ${task.completed ? 'Undo' : 'Complete'}
+                        </button>
+                        <button class="delete-btn" data-action="delete">
+                            <i class="fas fa-trash"></i> Delete
+                        </button>
                     </div>
                 </div>
                 <div class="subtasks-container">
-                    <ul class="subtasks-list" id="subtasks-for-${task.id}">${subtasksHtml}</ul>
+                    <ul class="subtasks-list" id="subtasks-for-${task.id}">
+                        ${subtasksHtml || ''}
+                    </ul>
                     <form class="add-subtask-form" data-task-id="${task.id}">
                         <input type="text" name="title" placeholder="Add subtask..." required>
-                        <button type="submit">Add</button>
+                        <button type="submit"><i class="fas fa-plus"></i> Add</button>
                     </form>
                 </div>
             `;
+            
             li.querySelector('.toggle-btn').addEventListener('click', handleToggleTask);
             li.querySelector('.delete-btn').addEventListener('click', handleDeleteTask);
             li.querySelector('.add-subtask-form').addEventListener('submit', handleAddSubtask);
-            li.querySelectorAll('.subtask-item .toggle-btn').forEach(btn => btn.addEventListener('click', handleToggleSubtask));
-            li.querySelectorAll('.subtask-item .delete-btn').forEach(btn => btn.addEventListener('click', handleDeleteSubtask));
+            
+            li.querySelectorAll('.subtask-item .toggle-btn').forEach(btn => {
+                btn.addEventListener('click', handleToggleSubtask);
+            });
+            
+            li.querySelectorAll('.subtask-item .delete-btn').forEach(btn => {
+                btn.addEventListener('click', handleDeleteSubtask);
+            });
+            
             return li;
         }
+
         function renderSubtask(subtask) {
-             if (!subtask || !subtask.id) return '';
-             return `
+            if (!subtask || !subtask.id) return '';
+            
+            return `
                 <li id="subtask-${subtask.id}" class="subtask-item ${subtask.completed ? 'completed' : ''}" data-subtask-id="${subtask.id}">
                     <div class="item-header">
                         <span class="item-title">${escapeHTML(subtask.title)}</span>
                         <div class="item-actions">
-                            <button class="toggle-btn ${subtask.completed ? 'completed' : ''}" data-action="toggle">${subtask.completed ? 'Undo' : 'Complete'}</button>
-                            <button class="delete-btn" data-action="delete">Delete</button>
+                            <button class="toggle-btn ${subtask.completed ? 'completed' : ''}" data-action="toggle">
+                                <i class="fas ${subtask.completed ? 'fa-undo' : 'fa-check'}"></i>
+                                ${subtask.completed ? 'Undo' : 'Complete'}
+                            </button>
+                            <button class="delete-btn" data-action="delete">
+                                <i class="fas fa-trash"></i> Delete
+                            </button>
                         </div>
                     </div>
                 </li>
             `;
         }
+
+        function renderEmptyState() {
+            return `
+                <div class="empty-state">
+                    <i class="fas fa-clipboard-list"></i>
+                    <p>No tasks yet</p>
+                    <span>Add your first task above to get started!</span>
+                </div>
+            `;
+        }
+
         function escapeHTML(str) {
             const div = document.createElement('div');
             div.appendChild(document.createTextNode(str || ''));
             return div.innerHTML;
         }
 
-        // --- Event Handlers (updated API endpoints, added copy/delete) ---
+        // --- Event Handlers (updated with improved UX) ---
         async function handleAddTask(event) {
             event.preventDefault();
             const titleInput = addTaskForm.querySelector('input[name="title"]');
