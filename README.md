@@ -83,8 +83,8 @@ kv_store.set_with_ttl("temporary_key", ttl_data, ttl_seconds=3600, tags=["tempor
 text_value = kv_store.get("text_key")  # Returns bytes that can be decoded: text_value.decode('utf-8')
 
 # Get a value with metadata
-image_data, metadata = kv_store.get_with_metadata("image_key")
-print(f"Image size: {metadata['size']} bytes, tags: {metadata['tags']}")
+result = kv_store.get_with_metadata("image_key")
+print(f"Image size: {result['metadata']['size']} bytes, tags: {result['metadata']['tags']}")
 
 # Query by tags
 image_keys = kv_store.query_by_tags(["image"])
@@ -99,9 +99,9 @@ kv_store.delete("text_key")
 
 # Get performance statistics
 stats = kv_store.get_stats()
-print(f"Total items: {stats['total_items']}")
+print(f"Total items: {stats['count']}")
 print(f"Buffer utilization: {stats['buffer_utilization_percent']:.2f}%")
-print(f"Operations: {stats['metrics']['operations']}")
+print(f"Operations: {stats['performance']['operations']}")
 
 # Run storage compaction
 compaction_results = kv_store.compact_storage()
@@ -180,34 +180,67 @@ kv_store = KeyValueStore(
     buffer_size_mb=buffer_size_mb, 
     namespace=namespace, 
     sync=kv_sync,
-    storage_backend="redis", 
-    host="localhost",     # Redis host
-    port=6379,            # Redis port 
-    db=0,                 # Redis database number
-    password=None         # Redis password if required
+    compression_enabled=True,
+    storage_backend="redis"
 )
-
-# In the future, additional backends like Memcached may be supported:
-# kv_store = KeyValueStore(..., storage_backend="memcache")
 ```
 
-#### Redis Backend Features
+#### Redis Backend Configuration
 
-The Redis backend provides several advantages for distributed applications:
+When using the Redis backend, the Redis connection parameters are handled by the storage backend. The Redis backend defaults to connecting to `localhost:6379` with database `0`. To customize Redis connection parameters, you need to modify the `StorageFactory` call or the `RedisStorage` initialization.
 
-- **Fully distributed storage**: Both data and metadata are stored in Redis, making it ideal for clustered applications
-- **High performance**: Redis's in-memory nature provides very fast read/write operations
-- **Automatic failover**: Can be used with Redis Sentinel or Redis Cluster for high availability
-- **Built-in TTL support**: Uses Redis's sorted sets for efficient TTL management
-- **Tag-based queries**: Leverages Redis sets for efficient tag querying
+**Option 1:** Create a wrapper function for custom configurations:
 
-To use the Redis backend, first install the required dependency:
+```python
+def create_redis_kv_store(data_folder_path, db, buffer_size_mb, namespace, sync, 
+                          redis_host='localhost', redis_port=6379, redis_db=0, redis_password=None):
+    """Create a KeyValueStore with Redis backend with custom Redis parameters."""
+    from storage_backends.redis import RedisStorage
+    
+    # Create custom Redis storage
+    redis_storage = RedisStorage(
+        base_path=data_folder_path,
+        host=redis_host,
+        port=redis_port,
+        db=redis_db,
+        password=redis_password
+    )
+    
+    # Create KeyValueStore with the custom Redis storage
+    kv_store = KeyValueStore(
+        data_folder_path=data_folder_path,
+        db=db,
+        buffer_size_mb=buffer_size_mb,
+        namespace=namespace,
+        sync=sync,
+        compression_enabled=True,
+        storage_backend="redis"
+    )
+    
+    # Replace the default Redis storage with our custom one
+    kv_store.storage = redis_storage
+    
+    return kv_store
 
-```bash
-pip install redis
+# Usage
+kv_store = create_redis_kv_store(
+    data_folder_path='./data',
+    db='my_db',
+    buffer_size_mb=1,
+    namespace='my_namespace',
+    sync=kv_sync,
+    redis_host='redis.example.com',
+    redis_port=6380,
+    redis_db=5,
+    redis_password='secret'
+)
 ```
 
-Then initialize your KeyValueStore with `storage_backend="redis"` and any Redis connection parameters.
+**Note:** The Redis backend differs from filesystem storage in its handling of data:
+
+1. Data is written to Redis immediately, rather than being kept in the buffer
+2. TTL is implemented using Redis's native expiration mechanism
+3. Tags are implemented using Redis sets for efficient querying
 
 To implement your own storage backend, create a class in the `storage_backends` directory that implements the required interface methods (see `fs.py` and `redis.py` for examples).
 
@@ -218,9 +251,8 @@ Monitor the performance and usage of your database:
 ```python
 # Get detailed statistics
 stats = kv_store.get_stats()
-print(f"Read operations: {stats['metrics']['operations'].get('read', {}).get('count', 0)}")
-print(f"Average read time: {stats['metrics']['operations'].get('read', {}).get('avg_ms', 0):.2f} ms")
-print(f"Data compression ratio: {stats['metrics']['compression_ratio']:.2f}x")
+print(f"Read operations: {stats['performance']['operations'].get('get', {}).get('count', 0)}")
+print(f"Average read time: {stats['performance']['operations'].get('get', {}).get('avg_ms', 0):.2f} ms")
 ```
 
 ## License
@@ -249,9 +281,6 @@ make test-fs
 
 # Rodar apenas testes do Redis
 make test-redis
-
-# Rodar apenas testes dos backends de armazenamento
-make test-backends
 ```
 
 ### Redis Tests
