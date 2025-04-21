@@ -18,7 +18,7 @@ setup(
     packages=['nadb', 'storage_backends'],
     
     name='nadb',
-    version='0.1.5',
+    version='0.1.6',
     install_requires=[],
     extras_require={
         'redis': ['redis>=3.5.0'],  # Optional Redis dependency

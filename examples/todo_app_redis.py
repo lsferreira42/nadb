@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 # Ensure Flask and nadb[redis] are installed:
 # pip install Flask nadb[redis]
 # Make sure a Redis server is running locally (default port 6379)
@@ -83,7 +84,7 @@ kv_store = KeyValueStore(
 
 # Ensure NADB sync stops gracefully on exit
 atexit.register(kv_sync.sync_exit)
-print("NADB with Redis backend initialized for Multi-List TODO app.")
+print("NADB initialized for Multi-List TODO app.")
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -493,7 +494,7 @@ LANDING_TEMPLATE = """
     <div class="container">
         <div class="header">
             <h1>TaskFlow</h1>
-            <p>Powered by NADB & Redis</p>
+            <p>Powered by <a href="https://github.com/lsferreira42/nadb" target="_blank">NADB</a></p>
         </div>
         
         <div class="content">
@@ -515,7 +516,7 @@ LANDING_TEMPLATE = """
         </div>
         
         <div class="footer">
-            &copy; 2023 TaskFlow App | Enterprise-Ready Todo Management
+            &copy; 2025 TaskFlow App
         </div>
     </div>
 
@@ -996,7 +997,7 @@ LIST_TEMPLATE = """
         </div>
         
         <div class="footer">
-            Powered by NADB & Redis | &copy; 2023 TaskFlow
+            Powered by <a href="https://github.com/lsferreira42/nadb" target="_blank">NADB</a> | &copy; 2025 TaskFlow
         </div>
     </div>
 
@@ -1333,6 +1334,9 @@ NOT_FOUND_TEMPLATE = """
         <div class="message">List Not Found</div>
         <div class="list-id">The requested List ID was not found:<br><code>{{ requested_id }}</code></div>
         <a href="{{ url_for('landing_page') }}" class="home-link">Return Home</a>
+    </div>
+    <div style="text-align: center; margin-top: 20px; font-size: 0.8rem; color: #6c757d;">
+        Powered by <a href="https://github.com/lsferreira42/nadb" target="_blank">NADB</a> | &copy; 2025 TaskFlow
     </div>
 </body>
 </html>
