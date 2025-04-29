@@ -9,6 +9,7 @@ import atexit
 import re # For UUID validation
 import functools # Needed for decorator
 import time # For cache expiration
+import os # For environment variables
 from flask import Flask, request, render_template_string, jsonify, redirect, url_for, abort # Added abort
 from nadb import KeyValueStore, KeyValueSync
 import traceback # For better error logging
@@ -66,6 +67,12 @@ def cache_decorator(ttl=300):  # Time to live in seconds (default 5 minutes)
 kv_sync = KeyValueSync(flush_interval_seconds=5)
 kv_sync.start()
 
+# Get Redis configuration from environment variables
+redis_host = os.environ.get('REDIS_HOST', 'localhost')
+redis_port = int(os.environ.get('REDIS_PORT', 6379))
+redis_db = int(os.environ.get('REDIS_DB', 0))
+redis_password = os.environ.get('REDIS_PASSWORD', None)
+
 # Initialize KeyValueStore with Redis backend
 # Using db='multi_todo_db' and namespace='lists'
 # Buffer size is less critical for Redis as writes often go direct, but still used
@@ -75,16 +82,23 @@ kv_store = KeyValueStore(
     buffer_size_mb=1,
     namespace='lists', # Namespace changed slightly to reflect multiple lists
     sync=kv_sync,
-    storage_backend="redis",
-    # host="localhost",  # Removed - Not accepted by KeyValueStore constructor
-    # port=6379,         # Removed - Not accepted by KeyValueStore constructor
-    # db=0,            # Default Redis DB number - Assume backend handles default
-    # password=None    # Set if your Redis requires a password - Assume backend handles default
+    storage_backend="redis"
 )
+
+# Configure Redis backend with environment variables
+from storage_backends.redis import RedisStorage
+custom_redis_storage = RedisStorage(
+    base_path='./nadb_data',
+    host=redis_host,
+    port=redis_port,
+    db=redis_db,
+    password=redis_password
+)
+kv_store.storage = custom_redis_storage
 
 # Ensure NADB sync stops gracefully on exit
 atexit.register(kv_sync.sync_exit)
-print("NADB initialized for Multi-List TODO app.")
+print(f"NADB initialized for Multi-List TODO app with Redis at {redis_host}:{redis_port} (DB: {redis_db})")
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -1563,5 +1577,5 @@ def api_delete_list(list_uuid):
 
 # --- Run App ---
 if __name__ == '__main__':
-    print("Starting Flask server (Multi-List AJAX version) on http://127.0.0.1:5001")
-    app.run(debug=True, port=5001, threaded=True) 
+    print("Starting Flask server (Multi-List AJAX version) on http://0.0.0.0:5001")
+    app.run(debug=False, host='0.0.0.0', port=5001, threaded=True) 
