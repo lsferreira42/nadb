@@ -5,8 +5,8 @@ A simple, thread-safe, zero external dependencies key-value store with asynchron
 [![Tests](https://github.com/lsferreira42/nadb/actions/workflows/tests.yml/badge.svg)](https://github.com/lsferreira42/nadb/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/lsferreira42/nadb/branch/main/graph/badge.svg)](https://codecov.io/gh/lsferreira42/nadb)
 
-:rotating_light: **This project is educational and not intended for production use.** :rotating_light:
-
+> For more details and comprehensive documentation, please refer to the  
+> [NADB Tutorial/Docs](https://github.com/lsferreira42/nadb/blob/main/docs/index.md).
 
 ## Features
 
