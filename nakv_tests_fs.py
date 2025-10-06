@@ -30,15 +30,18 @@ def data_dir(tmp_path):
 
 @pytest.fixture
 def kv_store(kv_sync, data_dir):
-    return KeyValueStore(str(data_dir), 'db1', 1, "ovo", kv_sync, compression_enabled=True, storage_backend="fs")
+    return KeyValueStore(str(data_dir), 'db1', 1, "ovo", kv_sync, compression_enabled=True, storage_backend="fs",
+                        enable_transactions=True, enable_backup=True, enable_indexing=True)
 
 @pytest.fixture
 def kv_store_no_compression(kv_sync, data_dir):
-    return KeyValueStore(str(data_dir), 'db1', 1, "no_compression", kv_sync, compression_enabled=False, storage_backend="fs")
+    return KeyValueStore(str(data_dir), 'db1', 1, "no_compression", kv_sync, compression_enabled=False, storage_backend="fs",
+                        enable_transactions=True, enable_backup=True, enable_indexing=True)
 
 @pytest.fixture
 def kv_store_2(kv_sync, data_dir):
-    return KeyValueStore(str(data_dir), "risoto", 1, "batata", kv_sync, storage_backend="fs")
+    return KeyValueStore(str(data_dir), "risoto", 1, "batata", kv_sync, storage_backend="fs",
+                        enable_transactions=True, enable_backup=True, enable_indexing=True)
 
 @pytest.fixture
 def metadata():
@@ -718,6 +721,191 @@ def test_storage_backend(kv_sync, data_dir):
     
     # Verify the file is gone from disk
     assert not kv_store.storage.file_exists(file_path)
+
+# Advanced Features Tests
+
+def test_transactions(kv_store):
+    """Test transaction functionality."""
+    print("\nTesting transactions...")
+    
+    # Test successful transaction
+    with kv_store.transaction() as tx:
+        tx.set("tx_key1", b"value1", ["tx", "test"])
+        tx.set("tx_key2", b"value2", ["tx", "test"])
+    
+    # Verify data was committed
+    assert kv_store.get("tx_key1") == b"value1"
+    assert kv_store.get("tx_key2") == b"value2"
+    
+    # Test transaction rollback
+    try:
+        with kv_store.transaction() as tx:
+            tx.set("tx_key3", b"value3", ["tx", "test"])
+            tx.set("tx_key4", b"value4", ["tx", "test"])
+            raise ValueError("Simulated error")
+    except ValueError:
+        pass
+    
+    # Verify rollback worked
+    with pytest.raises(KeyError):
+        kv_store.get("tx_key3")
+    with pytest.raises(KeyError):
+        kv_store.get("tx_key4")
+    
+    print("✓ Transactions test passed")
+
+def test_backup_and_recovery(kv_store):
+    """Test backup and recovery functionality."""
+    print("\nTesting backup and recovery...")
+    
+    # Add test data
+    test_data = [
+        ("backup_key1", b"data1", ["backup", "test"]),
+        ("backup_key2", b"data2", ["backup", "test"]),
+        ("backup_key3", b"data3", ["backup", "test"])
+    ]
+    
+    for key, value, tags in test_data:
+        kv_store.set(key, value, tags)
+    
+    kv_store.flush()
+    
+    # Create backup
+    backup_meta = kv_store.create_backup("test_backup", compression=True)
+    assert backup_meta.backup_id == "test_backup"
+    assert backup_meta.file_count >= 3
+    
+    # Verify backup integrity
+    assert kv_store.verify_backup("test_backup")
+    
+    # Clear data and restore
+    for key, _, _ in test_data:
+        kv_store.delete(key)
+    
+    # Verify data is gone
+    with pytest.raises(KeyError):
+        kv_store.get("backup_key1")
+    
+    # Restore from backup
+    success = kv_store.restore_backup("test_backup", verify_integrity=True)
+    assert success
+    
+    # Verify data is restored
+    assert kv_store.get("backup_key1") == b"data1"
+    assert kv_store.get("backup_key2") == b"data2"
+    assert kv_store.get("backup_key3") == b"data3"
+    
+    print("✓ Backup and recovery test passed")
+
+def test_advanced_indexing(kv_store):
+    """Test advanced indexing and caching."""
+    print("\nTesting advanced indexing...")
+    
+    # Add test data with various tags
+    products = [
+        ("product:1", b"Laptop", ["electronics", "computer", "expensive"]),
+        ("product:2", b"Mouse", ["electronics", "computer", "cheap"]),
+        ("product:3", b"Book", ["books", "education", "cheap"]),
+        ("product:4", b"Phone", ["electronics", "mobile", "expensive"]),
+    ]
+    
+    for key, value, tags in products:
+        kv_store.set(key, value, tags)
+    
+    kv_store.flush()
+    
+    # Test advanced tag queries
+    result = kv_store.query_by_tags_advanced(["electronics"], "AND", page=1, page_size=2)
+    if hasattr(result, 'keys'):  # QueryResult object
+        assert len(result.keys) == 2
+        assert result.total_count == 3
+        assert result.has_more == True
+    else:  # Dictionary fallback
+        assert len(result['keys']) == 2
+        assert result['total_count'] == 3
+        assert result['has_more'] == True
+    
+    # Test OR queries
+    result = kv_store.query_by_tags_advanced(["books", "mobile"], "OR")
+    if hasattr(result, 'keys'):  # QueryResult object
+        assert len(result.keys) == 2  # book and phone
+    else:  # Dictionary fallback
+        assert len(result['keys']) == 2  # book and phone
+    
+    # Test complex queries
+    conditions = [
+        {"field": "tags", "operator": "or", "values": ["electronics", "books"]},
+        {"field": "tags", "operator": "and", "value": ["cheap"]}
+    ]
+    result = kv_store.complex_query(conditions)
+    if hasattr(result, 'keys'):  # QueryResult object
+        assert len(result.keys) == 2  # mouse and book
+    else:  # Dictionary fallback
+        assert len(result['keys']) == 2  # mouse and book
+    
+    # Test cache performance (second query should be faster)
+    result1 = kv_store.query_by_tags_advanced(["electronics", "expensive"])
+    result2 = kv_store.query_by_tags_advanced(["electronics", "expensive"])
+    
+    # Second query should be a cache hit
+    if hasattr(result2, 'cache_hit'):  # QueryResult object
+        assert result2.cache_hit == True
+    else:  # Dictionary fallback
+        assert result2.get('cache_hit', False) == True
+    
+    print("✓ Advanced indexing test passed")
+
+def test_structured_logging(kv_store):
+    """Test structured logging functionality."""
+    print("\nTesting structured logging...")
+    
+    from logging_config import LoggingConfig
+    
+    # Get loggers
+    logger = LoggingConfig.get_logger('test')
+    perf_logger = LoggingConfig.get_performance_logger('test')
+    
+    # Test structured logging
+    logger.info("Test message", extra={'test_key': 'test_value'})
+    
+    # Test performance logging
+    perf_logger.log_metric("test_metric", 42.5, unit="ms")
+    
+    # Test operation tracking
+    op_id = "test_op_123"
+    perf_logger.start_operation(op_id, "test_operation", key="test_key")
+    perf_logger.end_operation(op_id, success=True, result_count=1)
+    
+    print("✓ Structured logging test passed")
+
+def test_advanced_statistics(kv_store):
+    """Test advanced statistics and monitoring."""
+    print("\nTesting advanced statistics...")
+    
+    # Add some data
+    for i in range(10):
+        kv_store.set(f"stats_key_{i}", f"value_{i}".encode(), ["stats", "test"])
+    
+    kv_store.flush()
+    
+    # Get comprehensive stats
+    stats = kv_store.get_stats()
+    
+    # Verify basic stats
+    assert stats['count'] >= 10
+    assert 'performance' in stats
+    
+    # Verify advanced stats are present
+    if 'index_stats' in stats:
+        assert 'tag_index' in stats['index_stats']
+    
+    if 'cache_stats' in stats:
+        assert 'query_cache' in stats['cache_stats']
+    
+    if 'active_transactions' in stats:
+        assert isinstance(stats['active_transactions'], int)
+    
+    print("✓ Advanced statistics test passed")
 
 if __name__ == "__main__":
     pytest.main([__file__]) 

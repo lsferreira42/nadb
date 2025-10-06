@@ -48,7 +48,8 @@ def redis_connection():
 @pytest.fixture
 def kv_store(kv_sync, data_dir, redis_connection):
     store = KeyValueStore(str(data_dir), 'db1', 1, "ovo", kv_sync, 
-                         compression_enabled=True, storage_backend="redis")
+                         compression_enabled=True, storage_backend="redis",
+                         enable_transactions=True, enable_backup=True, enable_indexing=True)
     # Clear any existing data
     store.flushdb()
     yield store
@@ -58,7 +59,8 @@ def kv_store(kv_sync, data_dir, redis_connection):
 @pytest.fixture
 def kv_store_no_compression(kv_sync, data_dir, redis_connection):
     store = KeyValueStore(str(data_dir), 'db1', 1, "no_compression", kv_sync, 
-                         compression_enabled=False, storage_backend="redis")
+                         compression_enabled=False, storage_backend="redis",
+                         enable_transactions=True, enable_backup=True, enable_indexing=True)
     store.flushdb()
     yield store
     store.flushdb()
@@ -66,7 +68,8 @@ def kv_store_no_compression(kv_sync, data_dir, redis_connection):
 @pytest.fixture
 def kv_store_2(kv_sync, data_dir, redis_connection):
     store = KeyValueStore(str(data_dir), "risoto", 1, "batata", kv_sync, 
-                         storage_backend="redis")
+                         storage_backend="redis",
+                         enable_transactions=True, enable_backup=True, enable_indexing=True)
     store.flushdb()
     yield store
     store.flushdb()
@@ -764,6 +767,182 @@ def test_redis_storage_backend(kv_sync, data_dir):
             kv_store.storage.close_connections()
         except Exception as e:
             print(f"Error during cleanup: {e}")
+
+# Advanced Features Tests for Redis
+
+def test_redis_transactions(kv_store):
+    """Test transaction functionality with Redis backend."""
+    print("\nTesting Redis transactions...")
+    
+    # Test successful transaction
+    with kv_store.transaction() as tx:
+        tx.set("redis_tx_key1", b"value1", ["tx", "redis"])
+        tx.set("redis_tx_key2", b"value2", ["tx", "redis"])
+    
+    # Verify data was committed
+    assert kv_store.get("redis_tx_key1") == b"value1"
+    assert kv_store.get("redis_tx_key2") == b"value2"
+    
+    # Test transaction rollback
+    try:
+        with kv_store.transaction() as tx:
+            tx.set("redis_tx_key3", b"value3", ["tx", "redis"])
+            tx.set("redis_tx_key4", b"value4", ["tx", "redis"])
+            raise ValueError("Simulated error")
+    except ValueError:
+        pass
+    
+    # Verify rollback worked
+    with pytest.raises(KeyError):
+        kv_store.get("redis_tx_key3")
+    with pytest.raises(KeyError):
+        kv_store.get("redis_tx_key4")
+    
+    print("✓ Redis transactions test passed")
+
+def test_redis_backup_and_recovery(kv_store):
+    """Test backup and recovery functionality with Redis backend."""
+    print("\nTesting Redis backup and recovery...")
+    
+    # Add test data
+    test_data = [
+        ("redis_backup_key1", b"data1", ["backup", "redis"]),
+        ("redis_backup_key2", b"data2", ["backup", "redis"]),
+        ("redis_backup_key3", b"data3", ["backup", "redis"])
+    ]
+    
+    for key, value, tags in test_data:
+        kv_store.set(key, value, tags)
+    
+    kv_store.flush()
+    
+    # Create backup
+    backup_meta = kv_store.create_backup("redis_test_backup", compression=True)
+    assert backup_meta.backup_id == "redis_test_backup"
+    assert backup_meta.file_count >= 3
+    
+    # Verify backup integrity
+    assert kv_store.verify_backup("redis_test_backup")
+    
+    # Clear data and restore
+    for key, _, _ in test_data:
+        kv_store.delete(key)
+    
+    # Verify data is gone
+    with pytest.raises(KeyError):
+        kv_store.get("redis_backup_key1")
+    
+    # Restore from backup
+    success = kv_store.restore_backup("redis_test_backup", verify_integrity=True)
+    assert success
+    
+    # Verify data is restored
+    assert kv_store.get("redis_backup_key1") == b"data1"
+    assert kv_store.get("redis_backup_key2") == b"data2"
+    assert kv_store.get("redis_backup_key3") == b"data3"
+    
+    print("✓ Redis backup and recovery test passed")
+
+def test_redis_advanced_indexing(kv_store):
+    """Test advanced indexing and caching with Redis backend."""
+    print("\nTesting Redis advanced indexing...")
+    
+    # Add test data with various tags
+    products = [
+        ("redis_product:1", b"Laptop", ["electronics", "computer", "expensive"]),
+        ("redis_product:2", b"Mouse", ["electronics", "computer", "cheap"]),
+        ("redis_product:3", b"Book", ["books", "education", "cheap"]),
+        ("redis_product:4", b"Phone", ["electronics", "mobile", "expensive"]),
+    ]
+    
+    for key, value, tags in products:
+        kv_store.set(key, value, tags)
+    
+    kv_store.flush()
+    
+    # Test advanced tag queries
+    result = kv_store.query_by_tags_advanced(["electronics"], "AND", page=1, page_size=2)
+    if hasattr(result, 'keys'):  # QueryResult object
+        assert len(result.keys) == 2
+        assert result.total_count == 3
+        assert result.has_more == True
+    else:  # Dictionary fallback
+        assert len(result['keys']) == 2
+        assert result['total_count'] == 3
+        assert result['has_more'] == True
+    
+    # Test OR queries
+    result = kv_store.query_by_tags_advanced(["books", "mobile"], "OR")
+    if hasattr(result, 'keys'):  # QueryResult object
+        assert len(result.keys) == 2  # book and phone
+    else:  # Dictionary fallback
+        assert len(result['keys']) == 2  # book and phone
+    
+    # Test complex queries
+    conditions = [
+        {"field": "tags", "operator": "or", "values": ["electronics", "books"]},
+        {"field": "tags", "operator": "and", "value": ["cheap"]}
+    ]
+    result = kv_store.complex_query(conditions)
+    if hasattr(result, 'keys'):  # QueryResult object
+        assert len(result.keys) == 2  # mouse and book
+    else:  # Dictionary fallback
+        assert len(result['keys']) == 2  # mouse and book
+    
+    print("✓ Redis advanced indexing test passed")
+
+def test_redis_connection_pooling(kv_sync, data_dir):
+    """Test Redis connection pooling functionality."""
+    print("\nTesting Redis connection pooling...")
+    
+    # Create store with Redis backend (connection pooling is automatic)
+    kv_store = KeyValueStore(
+        str(data_dir), 'pool_test', 1, "connection_pool", kv_sync,
+        storage_backend="redis", enable_transactions=True
+    )
+    
+    try:
+        kv_store.flushdb()
+        
+        # Test concurrent operations to verify connection pooling
+        import threading
+        import time
+        
+        results = []
+        errors = []
+        
+        def worker(worker_id):
+            try:
+                for i in range(10):
+                    key = f"pool_test_{worker_id}_{i}"
+                    value = f"value_{worker_id}_{i}".encode()
+                    kv_store.set(key, value, ["pool", "test"])
+                    retrieved = kv_store.get(key)
+                    assert retrieved == value
+                results.append(f"Worker {worker_id} completed")
+            except Exception as e:
+                errors.append(f"Worker {worker_id} error: {e}")
+        
+        # Create multiple threads to test connection pooling
+        threads = []
+        for i in range(5):
+            t = threading.Thread(target=worker, args=(i,))
+            threads.append(t)
+            t.start()
+        
+        # Wait for all threads
+        for t in threads:
+            t.join(timeout=10)
+        
+        # Verify results
+        assert len(errors) == 0, f"Errors occurred: {errors}"
+        assert len(results) == 5, f"Not all workers completed: {results}"
+        
+        print("✓ Redis connection pooling test passed")
+        
+    finally:
+        kv_store.flushdb()
+        kv_store.close()
 
 if __name__ == "__main__":
     pytest.main([__file__]) 

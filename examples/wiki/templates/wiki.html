@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% if page %}{{ page.title }}{% else %}Wiki System{% endif %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='wiki.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.8.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/5.1.1/marked.min.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <div class="logo">
+                    <a href="{{ url_for('home') }}">
+                        <i class="fas fa-book"></i>
+                        <span>Wiki System</span>
+                    </a>
+                </div>
+                
+                <div class="search-bar">
+                    <form action="{{ url_for('search') }}" method="GET" class="search-form">
+                        <input type="text" name="q" placeholder="Buscar páginas..." 
+                               value="{{ search_query or '' }}" class="search-input">
+                        <button type="submit" class="search-btn">
+                            <i class="fas fa-search"></i>
+                        </button>
+                    </form>
+                </div>
+                
+                <div class="header-actions">
+                    <a href="{{ url_for('create_page') }}" class="btn btn-primary">
+                        <i class="fas fa-plus"></i>
+                        Nova Página
+                    </a>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="main-container">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <!-- Estatísticas -->
+            {% if stats %}
+            <div class="sidebar-section">
+                <h3><i class="fas fa-chart-bar"></i> Estatísticas</h3>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-number">{{ stats.total_pages or 0 }}</div>
+                        <div class="stat-label">Páginas</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-number">{{ stats.total_views or 0 }}</div>
+                        <div class="stat-label">Visualizações</div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+
+            <!-- Páginas Populares -->
+            {% if popular_pages %}
+            <div class="sidebar-section">
+                <h3><i class="fas fa-fire"></i> Mais Acessadas</h3>
+                <ul class="page-list">
+                    {% for page in popular_pages %}
+                    <li>
+                        <a href="{{ url_for('view_page', slug=page.slug) }}">
+                            <span class="page-title">{{ page.title }}</span>
+                            <span class="page-views">{{ page.views }} views</span>
+                        </a>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            <!-- Páginas Recentes -->
+            {% if recent_pages %}
+            <div class="sidebar-section">
+                <h3><i class="fas fa-clock"></i> Recentes</h3>
+                <ul class="page-list">
+                    {% for page in recent_pages %}
+                    <li>
+                        <a href="{{ url_for('view_page', slug=page.slug) }}">
+                            <span class="page-title">{{ page.title }}</span>
+                            <span class="page-date">{{ page.last_modified[:10] }}</span>
+                        </a>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
+            <!-- Tags Populares -->
+            {% if all_tags %}
+            <div class="sidebar-section">
+                <h3><i class="fas fa-tags"></i> Tags</h3>
+                <div class="tag-cloud">
+                    {% for tag, count in all_tags %}
+                    <a href="{{ url_for('search') }}?tag={{ tag }}" class="tag">
+                        {{ tag }} ({{ count }})
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+        </aside>
+
+        <!-- Main Content -->
+        <main class="content">
+            {% if error %}
+            <!-- Error Message -->
+            <div class="error-container">
+                <div class="error-message">
+                    <i class="fas fa-exclamation-triangle"></i>
+                    <h2>Página não encontrada</h2>
+                    <p>{{ error }}</p>
+                    <a href="{{ url_for('create_page') }}" class="btn btn-primary">
+                        Criar esta página
+                    </a>
+                </div>
+            </div>
+
+            {% elif create_mode %}
+            <!-- Create Page Form -->
+            <div class="page-header">
+                <h1><i class="fas fa-plus"></i> Nova Página</h1>
+            </div>
+            
+            <form id="pageForm" class="page-form">
+                <div class="form-group">
+                    <label for="slug">Slug (URL):</label>
+                    <input type="text" id="slug" name="slug" required 
+                           placeholder="exemplo-pagina" pattern="[a-zA-Z0-9_-]+">
+                    <small>Apenas letras, números, _ e -</small>
+                </div>
+                
+                <div class="form-group">
+                    <label for="title">Título:</label>
+                    <input type="text" id="title" name="title" required 
+                           placeholder="Título da Página">
+                </div>
+                
+                <div class="form-group">
+                    <label for="tags">Tags:</label>
+                    <input type="text" id="tags" name="tags" 
+                           placeholder="tag1, tag2, tag3">
+                    <small>Separadas por vírgula</small>
+                </div>
+                
+                <div class="editor-container">
+                    <div class="editor-tabs">
+                        <button type="button" class="tab-btn active" data-tab="editor">
+                            <i class="fas fa-edit"></i> Editor
+                        </button>
+                        <button type="button" class="tab-btn" data-tab="preview">
+                            <i class="fas fa-eye"></i> Preview
+                        </button>
+                    </div>
+                    
+                    <div class="tab-content active" id="editor-tab">
+                        <textarea id="content" name="content" required 
+                                  placeholder="# Título da Página
+
+Escreva o conteúdo em **Markdown**...
+
+## Seção
+
+- Item 1
+- Item 2
+
+```python
+# Código de exemplo
+print('Hello, Wiki!')
+```"></textarea>
+                    </div>
+                    
+                    <div class="tab-content" id="preview-tab">
+                        <div id="preview-content" class="markdown-content">
+                            <p><em>Preview aparecerá aqui...</em></p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-save"></i> Salvar Página
+                    </button>
+                    <a href="{{ url_for('home') }}" class="btn btn-secondary">
+                        <i class="fas fa-times"></i> Cancelar
+                    </a>
+                </div>
+            </form>
+
+            {% elif edit_mode and page %}
+            <!-- Edit Page Form -->
+            <div class="page-header">
+                <h1><i class="fas fa-edit"></i> Editando: {{ page.title }}</h1>
+                <div class="page-actions">
+                    <a href="{{ url_for('view_page', slug=page.slug) }}" class="btn btn-secondary">
+                        <i class="fas fa-eye"></i> Visualizar
+                    </a>
+                    <a href="{{ url_for('page_history', slug=page.slug) }}" class="btn btn-secondary">
+                        <i class="fas fa-history"></i> Histórico
+                    </a>
+                </div>
+            </div>
+            
+            <form id="pageForm" class="page-form">
+                <input type="hidden" id="slug" name="slug" value="{{ page.slug }}">
+                
+                <div class="form-group">
+                    <label for="title">Título:</label>
+                    <input type="text" id="title" name="title" required 
+                           value="{{ page.title }}">
+                </div>
+                
+                <div class="form-group">
+                    <label for="tags">Tags:</label>
+                    <input type="text" id="tags" name="tags" 
+                           value="{{ page.tags | join(', ') }}">
+                    <small>Separadas por vírgula</small>
+                </div>
+                
+                <div class="editor-container">
+                    <div class="editor-tabs">
+                        <button type="button" class="tab-btn active" data-tab="editor">
+                            <i class="fas fa-edit"></i> Editor
+                        </button>
+                        <button type="button" class="tab-btn" data-tab="preview">
+                            <i class="fas fa-eye"></i> Preview
+                        </button>
+                    </div>
+                    
+                    <div class="tab-content active" id="editor-tab">
+                        <textarea id="content" name="content" required>{{ page.content }}</textarea>
+                    </div>
+                    
+                    <div class="tab-content" id="preview-tab">
+                        <div id="preview-content" class="markdown-content">
+                            <p><em>Preview aparecerá aqui...</em></p>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-primary">
+                        <i class="fas fa-save"></i> Salvar Alterações
+                    </button>
+                    <a href="{{ url_for('view_page', slug=page.slug) }}" class="btn btn-secondary">
+                        <i class="fas fa-times"></i> Cancelar
+                    </a>
+                </div>
+            </form>
+
+            {% elif history and page %}
+            <!-- Page History -->
+            <div class="page-header">
+                <h1><i class="fas fa-history"></i> Histórico: {{ page.title }}</h1>
+                <div class="page-actions">
+                    <a href="{{ url_for('view_page', slug=page.slug) }}" class="btn btn-secondary">
+                        <i class="fas fa-eye"></i> Visualizar
+                    </a>
+                    <a href="{{ url_for('edit_page', slug=page.slug) }}" class="btn btn-primary">
+                        <i class="fas fa-edit"></i> Editar
+                    </a>
+                </div>
+            </div>
+            
+            <div class="history-list">
+                {% for version in history %}
+                <div class="history-item {% if loop.first %}current{% endif %}">
+                    <div class="version-info">
+                        <div class="version-header">
+                            <span class="version-number">v{{ version.version }}</span>
+                            {% if loop.first %}
+                            <span class="current-badge">Atual</span>
+                            {% endif %}
+                        </div>
+                        <div class="version-meta">
+                            <span class="author">{{ version.author }}</span>
+                            <span class="date">{{ version.created_at[:19] }}</span>
+                        </div>
+                    </div>
+                    <div class="version-preview">
+                        {{ version.content[:200] }}...
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+
+            {% elif search_results is defined %}
+            <!-- Search Results -->
+            <div class="page-header">
+                <h1><i class="fas fa-search"></i> Resultados da Busca</h1>
+                {% if search_query %}
+                <p>Buscando por: <strong>"{{ search_query }}"</strong></p>
+                {% endif %}
+                {% if search_tag %}
+                <p>Filtrado por tag: <span class="tag">{{ search_tag }}</span></p>
+                {% endif %}
+            </div>
+            
+            {% if search_results %}
+            <div class="search-results">
+                {% for result in search_results %}
+                <div class="search-result">
+                    <h3><a href="{{ url_for('view_page', slug=result.slug) }}">{{ result.title }}</a></h3>
+                    <p class="result-meta">
+                        <span class="views">{{ result.views }} visualizações</span>
+                        <span class="date">{{ result.last_modified[:10] }}</span>
+                        {% if result.tags %}
+                        <span class="tags">
+                            {% for tag in result.tags %}
+                            <span class="tag">{{ tag }}</span>
+                            {% endfor %}
+                        </span>
+                        {% endif %}
+                    </p>
+                    <p class="result-excerpt">{{ result.content[:200] }}...</p>
+                </div>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="no-results">
+                <i class="fas fa-search"></i>
+                <h3>Nenhum resultado encontrado</h3>
+                <p>Tente termos diferentes ou crie uma nova página.</p>
+            </div>
+            {% endif %}
+
+            {% elif page %}
+            <!-- View Page -->
+            <div class="page-header">
+                <div class="page-title-section">
+                    <h1>{{ page.title }}</h1>
+                    <div class="page-meta">
+                        <span class="views"><i class="fas fa-eye"></i> {{ page.views }} visualizações</span>
+                        <span class="author"><i class="fas fa-user"></i> {{ page.author }}</span>
+                        <span class="date"><i class="fas fa-calendar"></i> {{ page.last_modified[:10] }}</span>
+                        <span class="version"><i class="fas fa-code-branch"></i> v{{ page.version }}</span>
+                    </div>
+                </div>
+                <div class="page-actions">
+                    <a href="{{ url_for('edit_page', slug=page.slug) }}" class="btn btn-primary">
+                        <i class="fas fa-edit"></i> Editar
+                    </a>
+                    <a href="{{ url_for('page_history', slug=page.slug) }}" class="btn btn-secondary">
+                        <i class="fas fa-history"></i> Histórico
+                    </a>
+                </div>
+            </div>
+            
+            {% if page.tags %}
+            <div class="page-tags">
+                {% for tag in page.tags %}
+                <a href="{{ url_for('search') }}?tag={{ tag }}" class="tag">{{ tag }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+            
+            <div class="markdown-content" id="page-content">
+                {{ page.content | markdown | safe }}
+            </div>
+
+            {% if is_home %}
+            <!-- Home Page Statistics -->
+            <div class="home-stats">
+                <h2><i class="fas fa-chart-line"></i> Estatísticas do Wiki</h2>
+                <div class="stats-cards">
+                    <div class="stat-card">
+                        <div class="stat-icon"><i class="fas fa-file-alt"></i></div>
+                        <div class="stat-info">
+                            <div class="stat-number">{{ stats.total_pages or 0 }}</div>
+                            <div class="stat-label">Total de Páginas</div>
+                        </div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon"><i class="fas fa-eye"></i></div>
+                        <div class="stat-info">
+                            <div class="stat-number">{{ stats.total_views or 0 }}</div>
+                            <div class="stat-label">Total de Visualizações</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            {% endif %}
+        </main>
+    </div>
+
+    <!-- Toast Notifications -->
+    <div id="toast-container"></div>
+
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" class="loading-overlay">
+        <div class="loading-spinner">
+            <i class="fas fa-spinner fa-spin"></i>
+            <p>Salvando...</p>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='wiki.js') }}"></script>
+</body>
+</html>

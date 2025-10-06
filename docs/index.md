@@ -9,22 +9,19 @@ It supports features like adding **tags** to categorize data, setting an expirat
 
 ```mermaid
 flowchart TD
-    A0["KeyValueStore
-"]
-    A1["Storage Backends (FileSystemStorage, RedisStorage)
-"]
-    A2["StorageFactory
-"]
-    A3["KeyValueSync
-"]
-    A4["KeyValueMetadata
-"]
-    A5["Tags
-"]
-    A6["Data Buffering & Flushing
-"]
-    A7["TTL (Time-To-Live)
-"]
+    A0["KeyValueStore"]
+    A1["Storage Backends (FileSystemStorage, RedisStorage)"]
+    A2["StorageFactory"]
+    A3["KeyValueSync"]
+    A4["KeyValueMetadata"]
+    A5["Tags"]
+    A6["Data Buffering & Flushing"]
+    A7["TTL (Time-To-Live)"]
+    A8["TransactionManager"]
+    A9["BackupManager"]
+    A10["IndexManager"]
+    A11["LoggingConfig"]
+    
     A0 -- "Delegates storage to" --> A1
     A2 -- "Creates" --> A1
     A0 -- "Uses factory for backend" --> A2
@@ -33,6 +30,12 @@ flowchart TD
     A0 -- "Implements buffering" --> A6
     A3 -- "Triggers flush/cleanup for" --> A0
     A3 -- "Manages TTL expiration" --> A7
+    A0 -- "Manages transactions" --> A8
+    A0 -- "Creates backups" --> A9
+    A0 -- "Optimizes queries" --> A10
+    A11 -- "Provides structured logging" --> A0
+    A1 -- "Uses connection pooling" --> A1
+    A10 -- "Caches queries" --> A5
 ```
 
 ## Chapters
@@ -53,6 +56,14 @@ flowchart TD
 ](07_keyvaluesync_.md)
 8. [KeyValueMetadata
 ](08_keyvaluemetadata_.md)
+9. [Advanced Features: Transactions
+](09_transactions_.md)
+10. [Advanced Features: Backup & Recovery
+](10_backup_recovery_.md)
+11. [Advanced Features: Indexing & Caching
+](11_indexing_caching_.md)
+12. [Advanced Features: Structured Logging
+](12_structured_logging_.md)
 
 
 ---

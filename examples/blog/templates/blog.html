@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>
+        {% if single_post %}{{ single_post.title }} - {% endif %}
+        {% if current_tag %}Tag: {{ current_tag }} - {% endif %}
+        {% if admin_mode %}Admin - {% endif %}
+        {% if create_mode %}Create Post - {% endif %}
+        {% if edit_mode %}Edit Post - {% endif %}
+        NADB Blog
+    </title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='blog.css') }}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/9.1.6/marked.min.js"></script>
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo">
+                    <a href="{{ url_for('index') }}">
+                        <i class="fas fa-blog"></i>
+                        NADB Blog
+                    </a>
+                </h1>
+                <nav class="nav">
+                    <a href="{{ url_for('index') }}" class="nav-link">
+                        <i class="fas fa-home"></i> Home
+                    </a>
+                    <a href="{{ url_for('create_post') }}" class="nav-link">
+                        <i class="fas fa-plus"></i> New Post
+                    </a>
+                    <a href="{{ url_for('admin') }}" class="nav-link">
+                        <i class="fas fa-cog"></i> Admin
+                    </a>
+                </nav>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <div class="container">
+            <div class="content-wrapper">
+                <!-- Sidebar -->
+                <aside class="sidebar">
+                    <div class="sidebar-section">
+                        <h3><i class="fas fa-tags"></i> Tags</h3>
+                        <div class="tag-cloud">
+                            {% if tags %}
+                                {% for tag in tags %}
+                                    <a href="{{ url_for('posts_by_tag', tag=tag) }}" 
+                                       class="tag {% if current_tag == tag %}active{% endif %}">
+                                        {{ tag }}
+                                    </a>
+                                {% endfor %}
+                            {% else %}
+                                <p class="no-tags">No tags available</p>
+                            {% endif %}
+                        </div>
+                    </div>
+
+                    {% if admin_mode and stats %}
+                    <div class="sidebar-section">
+                        <h3><i class="fas fa-chart-bar"></i> Statistics</h3>
+                        <div class="stats">
+                            <div class="stat-item">
+                                <span class="stat-label">Total Posts:</span>
+                                <span class="stat-value">{{ stats.total_posts }}</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Published:</span>
+                                <span class="stat-value">{{ stats.published_posts }}</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Drafts:</span>
+                                <span class="stat-value">{{ stats.draft_posts }}</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">Tags:</span>
+                                <span class="stat-value">{{ stats.total_tags }}</span>
+                            </div>
+                        </div>
+                        <button onclick="createBackup()" class="backup-btn">
+                            <i class="fas fa-download"></i> Create Backup
+                        </button>
+                    </div>
+                    {% endif %}
+                </aside>
+
+                <!-- Content Area -->
+                <div class="content">
+                    {% if error %}
+                        <div class="alert alert-error">
+                            <i class="fas fa-exclamation-triangle"></i>
+                            {{ error }}
+                        </div>
+                    {% endif %}
+
+                    <!-- Single Post View -->
+                    {% if single_post %}
+                        <article class="post single-post">
+                            <header class="post-header">
+                                <h1 class="post-title">{{ single_post.title }}</h1>
+                                <div class="post-meta">
+                                    <span class="post-author">
+                                        <i class="fas fa-user"></i> {{ single_post.author }}
+                                    </span>
+                                    <span class="post-date">
+                                        <i class="fas fa-calendar"></i> 
+                                        <time datetime="{{ single_post.created_at }}">
+                                            {{ single_post.created_at[:10] }}
+                                        </time>
+                                    </span>
+                                    {% if not single_post.published %}
+                                        <span class="post-status draft">
+                                            <i class="fas fa-eye-slash"></i> Draft
+                                        </span>
+                                    {% endif %}
+                                </div>
+                                {% if single_post.tags %}
+                                    <div class="post-tags">
+                                        {% for tag in single_post.tags %}
+                                            <a href="{{ url_for('posts_by_tag', tag=tag) }}" class="tag">{{ tag }}</a>
+                                        {% endfor %}
+                                    </div>
+                                {% endif %}
+                            </header>
+                            <div class="post-content markdown-content">
+                                {{ single_post.content }}
+                            </div>
+                            <footer class="post-footer">
+                                <a href="{{ url_for('edit_post', post_id=single_post.id) }}" class="btn btn-secondary">
+                                    <i class="fas fa-edit"></i> Edit Post
+                                </a>
+                                <a href="{{ url_for('index') }}" class="btn btn-outline">
+                                    <i class="fas fa-arrow-left"></i> Back to Blog
+                                </a>
+                            </footer>
+                        </article>
+
+                    <!-- Create Post Form -->
+                    {% elif create_mode %}
+                        <div class="form-container">
+                            <h2><i class="fas fa-plus"></i> Create New Post</h2>
+                            <form method="POST" class="post-form">
+                                <div class="form-group">
+                                    <label for="title">Title *</label>
+                                    <input type="text" id="title" name="title" required>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="author">Author</label>
+                                    <input type="text" id="author" name="author" value="Anonymous">
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="tags">Tags (comma-separated)</label>
+                                    <input type="text" id="tags" name="tags" placeholder="tutorial, python, nadb">
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="content">Content * (Markdown supported)</label>
+                                    <textarea id="content" name="content" rows="15" required placeholder="Write your post content here using Markdown..."></textarea>
+                                </div>
+                                
+                                <div class="form-group checkbox-group">
+                                    <label>
+                                        <input type="checkbox" name="published" checked>
+                                        <span class="checkmark"></span>
+                                        Publish immediately
+                                    </label>
+                                </div>
+                                
+                                <div class="form-actions">
+                                    <button type="submit" class="btn btn-primary">
+                                        <i class="fas fa-save"></i> Create Post
+                                    </button>
+                                    <a href="{{ url_for('index') }}" class="btn btn-outline">
+                                        <i class="fas fa-times"></i> Cancel
+                                    </a>
+                                </div>
+                            </form>
+                        </div>
+
+                    <!-- Edit Post Form -->
+                    {% elif edit_mode and post %}
+                        <div class="form-container">
+                            <h2><i class="fas fa-edit"></i> Edit Post</h2>
+                            <form method="POST" class="post-form">
+                                <div class="form-group">
+                                    <label for="title">Title *</label>
+                                    <input type="text" id="title" name="title" value="{{ post.title }}" required>
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="author">Author</label>
+                                    <input type="text" id="author" name="author" value="{{ post.author }}">
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="tags">Tags (comma-separated)</label>
+                                    <input type="text" id="tags" name="tags" value="{{ post.tags | join(', ') }}">
+                                </div>
+                                
+                                <div class="form-group">
+                                    <label for="content">Content * (Markdown supported)</label>
+                                    <textarea id="content" name="content" rows="15" required>{{ post.content }}</textarea>
+                                </div>
+                                
+                                <div class="form-group checkbox-group">
+                                    <label>
+                                        <input type="checkbox" name="published" {% if post.published %}checked{% endif %}>
+                                        <span class="checkmark"></span>
+                                        Published
+                                    </label>
+                                </div>
+                                
+                                <div class="form-actions">
+                                    <button type="submit" class="btn btn-primary">
+                                        <i class="fas fa-save"></i> Update Post
+                                    </button>
+                                    <a href="{{ url_for('view_post', post_id=post.id) }}" class="btn btn-outline">
+                                        <i class="fas fa-times"></i> Cancel
+                                    </a>
+                                    <button type="button" onclick="deletePost('{{ post.id }}')" class="btn btn-danger">
+                                        <i class="fas fa-trash"></i> Delete Post
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+
+                    <!-- Admin Mode -->
+                    {% elif admin_mode %}
+                        <div class="admin-header">
+                            <h2><i class="fas fa-cog"></i> Blog Administration</h2>
+                            <a href="{{ url_for('create_post') }}" class="btn btn-primary">
+                                <i class="fas fa-plus"></i> New Post
+                            </a>
+                        </div>
+                        
+                        {% if posts %}
+                            <div class="posts-table">
+                                {% for post in posts %}
+                                    <div class="post-row">
+                                        <div class="post-info">
+                                            <h3 class="post-title">
+                                                <a href="{{ url_for('view_post', post_id=post.id) }}">{{ post.title }}</a>
+                                                {% if not post.published %}
+                                                    <span class="status-badge draft">Draft</span>
+                                                {% endif %}
+                                            </h3>
+                                            <div class="post-meta">
+                                                <span>By {{ post.author }}</span>
+                                                <span>{{ post.created_at[:10] }}</span>
+                                                {% if post.tags %}
+                                                    <span class="post-tags-inline">
+                                                        {% for tag in post.tags %}
+                                                            <span class="tag-small">{{ tag }}</span>
+                                                        {% endfor %}
+                                                    </span>
+                                                {% endif %}
+                                            </div>
+                                        </div>
+                                        <div class="post-actions">
+                                            <a href="{{ url_for('view_post', post_id=post.id) }}" class="btn btn-sm btn-outline">
+                                                <i class="fas fa-eye"></i> View
+                                            </a>
+                                            <a href="{{ url_for('edit_post', post_id=post.id) }}" class="btn btn-sm btn-secondary">
+                                                <i class="fas fa-edit"></i> Edit
+                                            </a>
+                                            <button onclick="deletePost('{{ post.id }}')" class="btn btn-sm btn-danger">
+                                                <i class="fas fa-trash"></i> Delete
+                                            </button>
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <div class="empty-state">
+                                <i class="fas fa-blog"></i>
+                                <h3>No posts yet</h3>
+                                <p>Create your first blog post to get started!</p>
+                                <a href="{{ url_for('create_post') }}" class="btn btn-primary">
+                                    <i class="fas fa-plus"></i> Create First Post
+                                </a>
+                            </div>
+                        {% endif %}
+
+                    <!-- Blog Posts List -->
+                    {% else %}
+                        {% if current_tag %}
+                            <div class="page-header">
+                                <h2><i class="fas fa-tag"></i> Posts tagged with "{{ current_tag }}"</h2>
+                                <a href="{{ url_for('index') }}" class="btn btn-outline">
+                                    <i class="fas fa-times"></i> Clear Filter
+                                </a>
+                            </div>
+                        {% endif %}
+
+                        {% if posts %}
+                            <div class="posts-grid">
+                                {% for post in posts %}
+                                    <article class="post-card">
+                                        <header class="post-card-header">
+                                            <h2 class="post-card-title">
+                                                <a href="{{ url_for('view_post', post_id=post.id) }}">{{ post.title }}</a>
+                                            </h2>
+                                            <div class="post-card-meta">
+                                                <span class="post-author">
+                                                    <i class="fas fa-user"></i> {{ post.author }}
+                                                </span>
+                                                <span class="post-date">
+                                                    <i class="fas fa-calendar"></i> {{ post.created_at[:10] }}
+                                                </span>
+                                            </div>
+                                        </header>
+                                        
+                                        <div class="post-card-content">
+                                            <p>{{ post.content[:200] }}{% if post.content|length > 200 %}...{% endif %}</p>
+                                        </div>
+                                        
+                                        {% if post.tags %}
+                                            <div class="post-card-tags">
+                                                {% for tag in post.tags %}
+                                                    <a href="{{ url_for('posts_by_tag', tag=tag) }}" class="tag">{{ tag }}</a>
+                                                {% endfor %}
+                                            </div>
+                                        {% endif %}
+                                        
+                                        <footer class="post-card-footer">
+                                            <a href="{{ url_for('view_post', post_id=post.id) }}" class="read-more">
+                                                Read More <i class="fas fa-arrow-right"></i>
+                                            </a>
+                                        </footer>
+                                    </article>
+                                {% endfor %}
+                            </div>
+                        {% else %}
+                            <div class="empty-state">
+                                {% if current_tag %}
+                                    <i class="fas fa-tag"></i>
+                                    <h3>No posts found with tag "{{ current_tag }}"</h3>
+                                    <p>Try browsing other tags or return to the homepage.</p>
+                                    <a href="{{ url_for('index') }}" class="btn btn-primary">
+                                        <i class="fas fa-home"></i> Back to Home
+                                    </a>
+                                {% else %}
+                                    <i class="fas fa-blog"></i>
+                                    <h3>Welcome to NADB Blog!</h3>
+                                    <p>No posts have been published yet. Create your first post to get started.</p>
+                                    <a href="{{ url_for('create_post') }}" class="btn btn-primary">
+                                        <i class="fas fa-plus"></i> Create First Post
+                                    </a>
+                                {% endif %}
+                            </div>
+                        {% endif %}
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <div class="footer-content">
+                <p>&copy; 2025 NADB Blog Engine. Powered by <a href="https://github.com/lsferreira42/nadb" target="_blank">NADB</a></p>
+                <div class="footer-links">
+                    <a href="{{ url_for('api_stats') }}" target="_blank">API Stats</a>
+                    <a href="https://github.com/lsferreira42/nadb" target="_blank">GitHub</a>
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <!-- Toast Notification -->
+    <div id="toast" class="toast"></div>
+
+    <!-- Scripts -->
+    <script src="{{ url_for('static', filename='blog.js') }}"></script>
+</body>
+</html>

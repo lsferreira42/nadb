@@ -12,6 +12,7 @@ import time
 import random
 from datetime import datetime, timedelta
 import redis
+from redis.connection import ConnectionPool
 
 # Constants for compression
 COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
@@ -23,14 +24,20 @@ DEFAULT_SOCKET_TIMEOUT = 10.0  # Default socket timeout in seconds
 MAX_RECONNECT_ATTEMPTS = 5  # Maximum number of reconnection attempts
 INITIAL_RETRY_DELAY = 0.5  # Initial retry delay in seconds
 
+# Connection pool parameters
+DEFAULT_POOL_SIZE = 10  # Default maximum connections in pool
+DEFAULT_POOL_TIMEOUT = 20  # Default timeout for getting connection from pool
+
 class RedisStorage:
     """Redis storage backend for NADB key-value store."""
     
     def __init__(self, base_path=None, host='localhost', port=6379, db=0, password=None, 
                  socket_timeout=DEFAULT_SOCKET_TIMEOUT, 
-                 connection_timeout=DEFAULT_CONNECTION_TIMEOUT, **kwargs):
+                 connection_timeout=DEFAULT_CONNECTION_TIMEOUT,
+                 max_connections=DEFAULT_POOL_SIZE,
+                 connection_pool_timeout=DEFAULT_POOL_TIMEOUT, **kwargs):
         """
-        Initialize Redis storage backend.
+        Initialize Redis storage backend with connection pooling.
         
         Args:
             base_path: Ignored, included for compatibility with file-based storage
@@ -40,6 +47,8 @@ class RedisStorage:
             password: Redis password
             socket_timeout: Timeout for socket operations (in seconds)
             connection_timeout: Timeout for connection attempts (in seconds)
+            max_connections: Maximum connections in pool
+            connection_pool_timeout: Timeout for getting connection from pool
             **kwargs: Additional Redis connection parameters
         """
         self.logger = logging.getLogger(__name__)
@@ -52,6 +61,8 @@ class RedisStorage:
             'password': password,
             'socket_timeout': socket_timeout,
             'socket_connect_timeout': connection_timeout,
+            'max_connections': max_connections,
+            'connection_pool_timeout': connection_pool_timeout,
             **kwargs
         }
         
@@ -61,7 +72,11 @@ class RedisStorage:
         self.connection_errors = 0
         self.last_reconnect_time = 0
         
-        # Connect to Redis
+        # Initialize connection pool
+        self.connection_pool = None
+        self.redis = None
+        
+        # Connect to Redis with pool
         self._connect()
         
         # Key prefixes for different types of data
@@ -70,11 +85,11 @@ class RedisStorage:
         self.tag_prefix = "nadb:tag:"
         self.ttl_set = "nadb:ttl"
         
-        self.logger.info(f"Redis storage initialized: {host}:{port} DB:{db}")
+        self.logger.info(f"Redis storage initialized with pool: {host}:{port} DB:{db} (max_connections={max_connections})")
     
     def _connect(self):
         """
-        Connect to Redis server with exponential backoff for retries.
+        Connect to Redis server with connection pooling and exponential backoff for retries.
         
         Returns:
             True if connection successful, False otherwise
@@ -105,13 +120,34 @@ class RedisStorage:
         # Update last reconnect time
         self.last_reconnect_time = now
         
-        # Connect to Redis - não trate erros graciosamente para permitir falhas de teste
-        self.redis = redis.Redis(**self.connection_params)
-        # Teste a conexão com timeout
-        self.redis.ping()
-        self.connected = True
-        
-        return True
+        try:
+            # Create connection pool if it doesn't exist
+            if self.connection_pool is None:
+                pool_params = self.connection_params.copy()
+                # Remove pool-specific params that aren't for ConnectionPool
+                max_connections = pool_params.pop('max_connections', DEFAULT_POOL_SIZE)
+                pool_params.pop('connection_pool_timeout', None)
+                
+                self.connection_pool = ConnectionPool(
+                    max_connections=max_connections,
+                    **pool_params
+                )
+            
+            # Create Redis client with connection pool
+            self.redis = redis.Redis(connection_pool=self.connection_pool)
+            
+            # Test the connection
+            self.redis.ping()
+            self.connected = True
+            self.connection_errors = 0  # Reset error count on successful connection
+            
+            return True
+            
+        except Exception as e:
+            self.connection_errors += 1
+            self.last_connection_error = str(e)
+            self.logger.error(f"Failed to connect to Redis: {e}")
+            raise
     
     def _ensure_connection(self):
         """
@@ -738,6 +774,17 @@ class RedisStorage:
         except redis.RedisError as e:
             self.logger.error(f"Redis error in query_metadata: {str(e)}")
             return []
+    
+    def close_connections(self):
+        """Close connection pool and cleanup resources."""
+        try:
+            if self.connection_pool:
+                self.connection_pool.disconnect()
+                self.connection_pool = None
+            self.connected = False
+            self.logger.info("Redis connection pool closed")
+        except Exception as e:
+            self.logger.error(f"Error closing Redis connections: {e}")
     
     def cleanup_expired(self):
         """

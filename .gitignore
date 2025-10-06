@@ -32,6 +32,7 @@ coverage.xml
 
 # Project-specific files and directories
 data/
+backups/
 *.db
 *.sqlite
 *.sqlite3
@@ -41,3 +42,6 @@ data/
 Thumbs.db
 
 .pipy-token
+dump.rdb
+*.log
+

@@ -1,28 +1,31 @@
 # NADB - Not A Database
 
-A simple, thread-safe, zero external dependencies key-value store with asynchronous memory buffering capabilities and disk persistence.
+A high-performance, enterprise-grade key-value store with advanced features including transactions, backup & recovery, intelligent indexing, and structured logging.
 
 [![Tests](https://github.com/lsferreira42/nadb/actions/workflows/tests.yml/badge.svg)](https://github.com/lsferreira42/nadb/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/lsferreira42/nadb/branch/main/graph/badge.svg)](https://codecov.io/gh/lsferreira42/nadb)
 
-> For more details and comprehensive documentation, please refer to the  
-> [NADB Tutorial/Docs](https://github.com/lsferreira42/nadb/blob/main/docs/index.md).
+> For comprehensive documentation and tutorials, please refer to the  
+> [NADB Documentation](https://github.com/lsferreira42/nadb/blob/main/docs/index.md).
 
-## Features
+## 🚀 Features
 
-- Thread-safe operations for setting, getting, and deleting key-value pairs.
-- In-memory buffering of key-value pairs with asynchronous flushing to disk.
-- Periodic flushing of the buffer to disk to ensure data integrity.
-- Manual flushing capability for immediate persistence.
-- Namespace and database separation for organized data storage.
-- Simple usage and minimal setup required.
-- **NEW:** Support for any file type (binary data storage)
-- **NEW:** Tag system for organizing and querying data
-- **NEW:** Data compression for efficient storage
-- **NEW:** TTL (Time To Live) for automatic data expiration
-- **NEW:** Performance metrics and monitoring
-- **NEW:** Storage compaction for optimizing disk usage
-- **NEW:** Pluggable storage backends
+### Core Features
+- **Thread-safe operations** for concurrent access
+- **In-memory buffering** with asynchronous disk persistence
+- **Binary data storage** for any file type
+- **Tag system** for flexible data organization
+- **TTL (Time To Live)** for automatic data expiration
+- **Data compression** for efficient storage
+- **Pluggable storage backends** (Filesystem, Redis)
+
+### 🆕 Advanced Features (Enterprise-Grade)
+- **🔄 ACID Transactions** with automatic rollback
+- **💾 Backup & Recovery** with incremental backups
+- **⚡ Intelligent Indexing & Caching** for fast queries
+- **📊 Structured Logging** with performance metrics
+- **🔗 Connection Pooling** for Redis backend
+- **🔍 Complex Queries** with pagination support
 
 ## Installation
 
@@ -36,223 +39,210 @@ pip install nadb[redis]
 
 The basic installation includes only the filesystem backend. If you want to use the Redis backend, you need to install the package with Redis support as shown above.
 
-## Quickstart
+## 🚀 Quick Start
 
-Here's a basic example of how to use NADB:
+### Basic Usage
 
 ```python
 from nadb import KeyValueStore, KeyValueSync
 
-# Create a KeyValueStore instance
+# Setup
+kv_sync = KeyValueSync(flush_interval_seconds=5)
+kv_sync.start()
 
-data_folder_path = './data'
-db_name = 'db1'
-buffer_size_mb = 1  # 1 MB
-flush_interval_seconds = 60  # 1 minute
-namespace = 'namespace1'
-
-# Initialize the KeyValueSync for asynchronous flushing
-kv_sync = KeyValueSync(flush_interval_seconds)
-kv_sync.start()  # Start the synchronization thread
-
-# Initialize the KeyValueStore with compression enabled
+# Create store with all advanced features enabled
 kv_store = KeyValueStore(
-    data_folder_path=data_folder_path, 
-    db=db_name, 
-    buffer_size_mb=buffer_size_mb, 
-    namespace=namespace, 
+    data_folder_path="./data",
+    db="my_app",
+    buffer_size_mb=1,
+    namespace="production",
     sync=kv_sync,
     compression_enabled=True,
-    storage_backend="fs"  # Use the filesystem storage backend
+    storage_backend="fs",
+    enable_transactions=True,    # 🔄 Enable ACID transactions
+    enable_backup=True,          # 💾 Enable backup & recovery
+    enable_indexing=True,        # ⚡ Enable intelligent indexing
+    cache_size=10000            # 🚀 Cache up to 10K queries
 )
 
-# Store text data with tags
-text_data = "Hello, world!".encode('utf-8')
-kv_store.set("text_key", text_data, tags=["text", "greeting"])
+# Basic operations
+kv_store.set("user:123", b"Alice Johnson", tags=["user", "premium"])
+user_data = kv_store.get("user:123")
 
-# Store binary data (any type of file)
-with open("image.png", "rb") as f:
-    binary_data = f.read()
-kv_store.set("image_key", binary_data, tags=["binary", "image"])
+# Advanced querying with pagination
+results = kv_store.query_by_tags_advanced(
+    tags=["user", "premium"], 
+    operator="AND", 
+    page=1, 
+    page_size=50
+)
+print(f"Found {results['total_count']} premium users")
 
-# Store data with TTL (expiration)
-ttl_data = "This will expire".encode('utf-8')
-kv_store.set_with_ttl("temporary_key", ttl_data, ttl_seconds=3600, tags=["temporary"])
-
-# Get a value
-text_value = kv_store.get("text_key")  # Returns bytes that can be decoded: text_value.decode('utf-8')
-
-# Get a value with metadata
-result = kv_store.get_with_metadata("image_key")
-print(f"Image size: {result['metadata']['size']} bytes, tags: {result['metadata']['tags']}")
-
-# Query by tags
-image_keys = kv_store.query_by_tags(["image"])
-print(f"All image keys: {image_keys}")
-
-# List all tags
-all_tags = kv_store.list_all_tags()
-print(f"All tags in store: {all_tags}")
-
-# Delete a key-value pair
-kv_store.delete("text_key")
-
-# Get performance statistics
-stats = kv_store.get_stats()
-print(f"Total items: {stats['count']}")
-print(f"Buffer utilization: {stats['buffer_utilization_percent']:.2f}%")
-print(f"Operations: {stats['performance']['operations']}")
-
-# Run storage compaction
-compaction_results = kv_store.compact_storage()
-print(f"Compaction results: {compaction_results}")
-
-# Manual flush (optional, as flushing occurs automatically based on buffer size and time interval)
-kv_store.flush()
-
-# Stop the synchronization process and exit
+# Cleanup
 kv_sync.sync_exit()
 ```
 
-## Advanced Features
-
-### Tag System
-
-NADB allows you to associate tags with your key-value pairs, making organization and retrieval more flexible:
+### 🔄 Transactions
 
 ```python
-# Store with multiple tags
-kv_store.set("user:123", user_data, tags=["user", "premium", "active"])
-
-# Query by one or more tags (all tags must match)
-premium_users = kv_store.query_by_tags(["user", "premium"])
+# Atomic operations with automatic rollback
+with kv_store.transaction() as tx:
+    tx.set("order:1", b"Order data", ["order", "pending"])
+    tx.set("inventory:item1", b"Updated count", ["inventory"])
+    # Both operations succeed or both fail
 ```
 
-### Binary Data Storage
-
-NADB now supports storing any type of binary data. This is perfect for images, documents, or any other file type:
+### 💾 Backup & Recovery
 
 ```python
-# Store an image
-with open("large_image.jpg", "rb") as f:
-    image_data = f.read()
-kv_store.set("image:profile", image_data, tags=["image", "profile"])
+# Create backups
+full_backup = kv_store.create_backup("backup_2024_01", compression=True)
+incremental = kv_store.create_incremental_backup(full_backup.backup_id)
 
-# Store a PDF document
-with open("document.pdf", "rb") as f:
-    pdf_data = f.read()
-kv_store.set("document:contract", pdf_data, tags=["document", "contract"])
+# Restore from backup
+kv_store.restore_backup("backup_2024_01", verify_integrity=True)
 ```
 
-### TTL (Time To Live)
-
-Automatically expire data after a specified time:
+### ⚡ Advanced Indexing
 
 ```python
-# This data will automatically be removed after 1 hour
-kv_store.set_with_ttl("session:token", token_data, ttl_seconds=3600, tags=["session"])
+# Complex queries with caching
+conditions = [
+    {"field": "tags", "operator": "or", "values": ["premium", "enterprise"]},
+    {"field": "tags", "operator": "and", "value": ["active"]}
+]
+results = kv_store.complex_query(conditions, page=1, page_size=100)
+print(f"Query executed in {results['execution_time_ms']:.2f}ms")
 ```
 
-### Compression
+## 📚 Advanced Features
 
-NADB automatically compresses large data to save disk space:
+### 🔄 ACID Transactions
+Ensure data consistency with atomic operations:
 
 ```python
-# Enable compression when creating the store
-kv_store = KeyValueStore(..., compression_enabled=True)
-
-# Run manual compaction to optimize existing data
-compaction_results = kv_store.compact_storage()
+# All operations succeed or all fail
+with kv_store.transaction() as tx:
+    tx.set("account:1", b"balance:100", ["account"])
+    tx.set("account:2", b"balance:200", ["account"])
+    tx.batch_set([
+        ("log:1", b"transfer initiated", ["log"]),
+        ("log:2", b"transfer completed", ["log"])
+    ])
 ```
 
-### Storage Backends
-
-NADB supports pluggable storage backends to store your data in different systems:
+### 💾 Backup & Recovery
+Enterprise-grade data protection:
 
 ```python
-# Use the default filesystem backend
-kv_store = KeyValueStore(..., storage_backend="fs")
+# Full backup with compression
+backup = kv_store.create_backup("daily_backup", compression=True)
 
-# Use Redis as a distributed storage backend (requires 'redis' package)
-kv_store = KeyValueStore(
-    data_folder_path=data_folder_path, 
-    db=db_name, 
-    buffer_size_mb=buffer_size_mb, 
-    namespace=namespace, 
-    sync=kv_sync,
-    compression_enabled=True,
-    storage_backend="redis"
+# Incremental backup (only changes)
+incremental = kv_store.create_incremental_backup(backup.backup_id)
+
+# Verify and restore
+if kv_store.verify_backup(backup.backup_id):
+    kv_store.restore_backup(backup.backup_id, clear_existing=True)
+```
+
+### ⚡ Intelligent Indexing & Caching
+Lightning-fast queries with automatic optimization:
+
+```python
+# Advanced queries with pagination
+result = kv_store.query_by_tags_advanced(
+    tags=["user", "premium"], 
+    operator="AND",
+    page=1, 
+    page_size=50
 )
-```
 
-#### Redis Backend Configuration
+# Complex multi-condition queries
+conditions = [
+    {"field": "tags", "operator": "or", "values": ["premium", "enterprise"]},
+    {"field": "tags", "operator": "and", "value": ["active"]}
+]
+result = kv_store.complex_query(conditions)
 
-When using the Redis backend, the Redis connection parameters are handled by the storage backend. The Redis backend defaults to connecting to `localhost:6379` with database `0`. To customize Redis connection parameters, you need to modify the `StorageFactory` call or the `RedisStorage` initialization.
-
-**Option 1:** Create a wrapper function for custom configurations:
-
-```python
-def create_redis_kv_store(data_folder_path, db, buffer_size_mb, namespace, sync, 
-                          redis_host='localhost', redis_port=6379, redis_db=0, redis_password=None):
-    """Create a KeyValueStore with Redis backend with custom Redis parameters."""
-    from storage_backends.redis import RedisStorage
-    
-    # Create custom Redis storage
-    redis_storage = RedisStorage(
-        base_path=data_folder_path,
-        host=redis_host,
-        port=redis_port,
-        db=redis_db,
-        password=redis_password
-    )
-    
-    # Create KeyValueStore with the custom Redis storage
-    kv_store = KeyValueStore(
-        data_folder_path=data_folder_path,
-        db=db,
-        buffer_size_mb=buffer_size_mb,
-        namespace=namespace,
-        sync=sync,
-        compression_enabled=True,
-        storage_backend="redis"
-    )
-    
-    # Replace the default Redis storage with our custom one
-    kv_store.storage = redis_storage
-    
-    return kv_store
-
-# Usage
-kv_store = create_redis_kv_store(
-    data_folder_path='./data',
-    db='my_db',
-    buffer_size_mb=1,
-    namespace='my_namespace',
-    sync=kv_sync,
-    redis_host='redis.example.com',
-    redis_port=6380,
-    redis_db=5,
-    redis_password='secret'
-)
-```
-
-**Note:** The Redis backend differs from filesystem storage in its handling of data:
-
-1. Data is written to Redis immediately, rather than being kept in the buffer
-2. TTL is implemented using Redis's native expiration mechanism
-3. Tags are implemented using Redis sets for efficient querying
-
-To implement your own storage backend, create a class in the `storage_backends` directory that implements the required interface methods (see `fs.py` and `redis.py` for examples).
-
-### Performance Metrics
-
-Monitor the performance and usage of your database:
-
-```python
-# Get detailed statistics
+# Cache statistics
 stats = kv_store.get_stats()
-print(f"Read operations: {stats['performance']['operations'].get('get', {}).get('count', 0)}")
-print(f"Average read time: {stats['performance']['operations'].get('get', {}).get('avg_ms', 0):.2f} ms")
+print(f"Cache hit rate: {stats['cache_stats']['query_cache']['hit_rate']:.2%}")
+```
+
+### 📊 Structured Logging
+Comprehensive observability with JSON logs:
+
+```python
+from logging_config import LoggingConfig
+
+# Get component-specific loggers
+logger = LoggingConfig.get_logger('application')
+perf_logger = LoggingConfig.get_performance_logger('application')
+
+# Structured logging with metrics
+logger.info("User operation", extra={
+    'user_id': 'user:123',
+    'operation': 'login',
+    'ip_address': '192.168.1.100'
+})
+
+# Performance tracking
+perf_logger.log_metric("active_users", 1250)
+```
+
+### 🔗 Connection Pooling (Redis)
+Optimized Redis connections for high concurrency:
+
+```python
+# Redis backend with connection pooling
+kv_store = KeyValueStore(
+    storage_backend="redis",
+    # Connection pool automatically configured
+    # Supports high-concurrency workloads
+)
+```
+
+### 🏷️ Tag System & Binary Storage
+Flexible data organization:
+
+```python
+# Store any binary data with tags
+with open("document.pdf", "rb") as f:
+    kv_store.set("doc:contract", f.read(), tags=["document", "legal", "2024"])
+
+# Query by tags
+legal_docs = kv_store.query_by_tags(["legal", "2024"])
+```
+
+### ⏰ TTL (Time To Live)
+Automatic data expiration:
+
+```python
+# Session data that expires in 1 hour
+kv_store.set_with_ttl("session:abc123", session_data, 3600, tags=["session"])
+```
+
+### 🗜️ Compression & Storage Backends
+Efficient storage with multiple backends:
+
+```python
+# Filesystem backend (default)
+kv_store = KeyValueStore(storage_backend="fs", compression_enabled=True)
+
+# Redis backend for distributed storage
+kv_store = KeyValueStore(storage_backend="redis")
+```
+
+### 📈 Performance Monitoring
+Built-in metrics and statistics:
+
+```python
+stats = kv_store.get_stats()
+print(f"Total keys: {stats['count']}")
+print(f"Cache hit rate: {stats['cache_stats']['query_cache']['hit_rate']:.2%}")
+print(f"Active transactions: {stats['active_transactions']}")
+print(f"Average query time: {stats['query_stats']['tags_and']['avg_time_ms']:.2f}ms")
 ```
 
 ## License

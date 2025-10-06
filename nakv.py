@@ -11,10 +11,40 @@ from hashlib import blake2b
 from collections import defaultdict
 from datetime import datetime, timedelta
 import logging
+from typing import List, Dict, Any, Optional, Tuple, Union
 
 from storage_backends import StorageFactory
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
+# Try to import advanced features, fall back gracefully if not available
+try:
+    from logging_config import LoggingConfig
+    LoggingConfig.setup_logging()
+    LOGGING_AVAILABLE = True
+except ImportError:
+    LoggingConfig = None
+    LOGGING_AVAILABLE = False
+
+try:
+    from transaction import TransactionManager
+    TRANSACTIONS_AVAILABLE = True
+except ImportError:
+    TransactionManager = None
+    TRANSACTIONS_AVAILABLE = False
+
+try:
+    from backup_manager import BackupManager
+    BACKUP_AVAILABLE = True
+except ImportError:
+    BackupManager = None
+    BACKUP_AVAILABLE = False
+
+try:
+    from index_manager import IndexManager, QueryOperator
+    INDEXING_AVAILABLE = True
+except ImportError:
+    IndexManager = None
+    QueryOperator = None
+    INDEXING_AVAILABLE = False
 
 # Constants for compression
 COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
@@ -133,9 +163,10 @@ class KeyValueMetadata:
                                 size = ?,
                                 ttl = ?
                             WHERE path = ? AND key = ? AND db = ? AND namespace = ?'''
+                    now = datetime.now().isoformat()
                     params = (
-                        datetime.now(),
-                        datetime.now(),
+                        now,
+                        now,
                         metadata.get("size"),
                         metadata.get("ttl"),
                         metadata.get("path"),
@@ -158,14 +189,15 @@ class KeyValueMetadata:
                                 size,
                                 ttl
                             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+                    now = datetime.now().isoformat()
                     params = (
                         metadata.get("path"),
                         metadata.get("key"),
                         metadata.get("db"),
                         metadata.get("namespace"),
-                        datetime.now(),
-                        datetime.now(),
-                        datetime.now(),
+                        now,
+                        now,
+                        now,
                         metadata.get("size"),
                         metadata.get("ttl")
                     )
@@ -258,7 +290,7 @@ class KeyValueMetadata:
                 # Update last accessed time
                 db_conn.execute(
                     "UPDATE metadata SET last_accessed = ? WHERE id = ?",
-                    (datetime.now(), row[0])
+                    (datetime.now().isoformat(), row[0])
                 )
                 db_conn.commit()
             
@@ -428,7 +460,7 @@ class KeyValueMetadata:
         
     def cleanup_expired(self):
         """Remove entries that have expired based on TTL."""
-        now = datetime.now()
+        now = datetime.now().isoformat()
         
         # Find expired entries
         sql = """
@@ -644,10 +676,12 @@ class PerformanceMetrics:
 
 
 class KeyValueStore:
-    """A key-value store that persists data to disk"""
+    """A key-value store that persists data to disk with advanced features"""
     def __init__(self, data_folder_path: str, db: str, buffer_size_mb: float,
                  namespace: str, sync: KeyValueSync, compression_enabled: bool = True, 
-                 storage_backend: str = "fs"):
+                 storage_backend: str = "fs", enable_transactions: bool = True,
+                 enable_backup: bool = True, enable_indexing: bool = True,
+                 cache_size: int = 10000):
         self.data_folder_path = data_folder_path
         self.buffer_size_mb = buffer_size_mb
         self.db = db
@@ -656,6 +690,15 @@ class KeyValueStore:
         self.current_buffer_size = 0
         self.locks = {}
         self.locks_management_lock = threading.RLock()
+        
+        # Initialize logging (if available)
+        if LOGGING_AVAILABLE:
+            self.logger = LoggingConfig.get_logger('keyvaluestore')
+            self.perf_logger = LoggingConfig.get_performance_logger('storage')
+        else:
+            import logging
+            self.logger = logging.getLogger('nadb.keyvaluestore')
+            self.perf_logger = None
         
         # Initialize the storage backend
         self.storage = StorageFactory.create_storage(storage_backend, base_path=data_folder_path)
@@ -683,6 +726,30 @@ class KeyValueStore:
         
         # Compression
         self.compression_enabled = compression_enabled
+        
+        # Initialize advanced features (if available)
+        if enable_transactions and TRANSACTIONS_AVAILABLE:
+            self.transaction_manager = TransactionManager(self)
+        else:
+            self.transaction_manager = None
+            if enable_transactions and not TRANSACTIONS_AVAILABLE:
+                self.logger.warning("Transactions requested but not available - install advanced features")
+        
+        if enable_backup and BACKUP_AVAILABLE:
+            self.backup_manager = BackupManager(self)
+        else:
+            self.backup_manager = None
+            if enable_backup and not BACKUP_AVAILABLE:
+                self.logger.warning("Backup requested but not available - install advanced features")
+        
+        if enable_indexing and INDEXING_AVAILABLE:
+            self.index_manager = IndexManager(self, cache_size)
+        else:
+            self.index_manager = None
+            if enable_indexing and not INDEXING_AVAILABLE:
+                self.logger.warning("Indexing requested but not available - install advanced features")
+        
+        self.logger.info(f"KeyValueStore initialized: {db}.{namespace} on {storage_backend} backend")
 
     def _get_hash(self, key: str) -> str:
         """Get hash of the key for use in file naming."""
@@ -834,63 +901,76 @@ class KeyValueStore:
         """
         if not isinstance(value, bytes):
             raise TypeError("Value must be bytes")
-            
-        start_time = time.time()
-        data_len = len(value) # Store length early
         
-        with self._get_lock(key):
+        op_id = f"set_{key}_{int(time.time() * 1000)}"
+        if self.perf_logger:
+            self.perf_logger.start_operation(op_id, "set", key=key, data_size=len(value))
+        
+        try:
+            data_len = len(value)
             
-            # --- FIX: Immediate write for Redis Backend --- 
-            if self.is_redis_backend:
-                path = self._get_path(key)
-                data_to_write = self._compress_data(value)
-                success = self.storage.write_data(path, data_to_write)
-                if success:
+            with self._get_lock(key):
+                if self.is_redis_backend:
+                    path = self._get_path(key)
+                    data_to_write = self._compress_data(value)
+                    success = self.storage.write_data(path, data_to_write)
+                    if success:
+                        metadata = {
+                            "path": path,
+                            "key": key,
+                            "db": self.db,
+                            "namespace": self.namespace,
+                            "size": data_len,  # Use original size for metadata
+                            "ttl": None
+                        }
+                        if tags:
+                            metadata["tags"] = tags
+                        self.storage.set_metadata(metadata)
+                        
+                        # Update indexes
+                        if self.index_manager:
+                            self.index_manager.add_key_to_indexes(key, tags or [], metadata)
+                        
+                        # Remove from buffer if it exists
+                        if key in self.buffer:
+                             self.current_buffer_size -= len(self.buffer[key])
+                             del self.buffer[key]
+                    else:
+                        self.logger.error(f"Immediate Redis write failed for key {key}")
+                        raise IOError(f"Failed to write key {key} to Redis backend")
+                else:
+                    # Original behavior for non-Redis backends (buffering)
+                    self.buffer[key] = value
+                    self.current_buffer_size += data_len
+                    
+                    # Update metadata (SQLite)
                     metadata = {
-                        "path": path,
+                        "path": self._get_path(key),
                         "key": key,
                         "db": self.db,
                         "namespace": self.namespace,
-                        "size": len(data_to_write), # Use compressed size for metadata
-                        "ttl": None # Ensure no TTL is set here
+                        "size": data_len,
+                        "ttl": None
                     }
                     if tags:
                         metadata["tags"] = tags
-                    self.storage.set_metadata(metadata)
-                    # Remove from buffer if it exists (might have been added before lock)
-                    if key in self.buffer:
-                         self.current_buffer_size -= len(self.buffer[key])
-                         del self.buffer[key]
-                else:
-                    # If write failed, maybe add back to buffer? Or just raise?
-                    # For now, let's log and not modify buffer state here
-                    logging.error(f"Immediate Redis write failed for key {key}")
-                    # Raising an error might be better depending on desired guarantees
-                    # raise IOError(f"Failed to write key {key} to Redis backend")
-            # --- END FIX ---
-            else:
-                # Original behavior for non-Redis backends (buffering)
-                self.buffer[key] = value
-                self.current_buffer_size += data_len
-                
-                # Update metadata (SQLite)
-                metadata = {
-                    "path": self._get_path(key),
-                    "key": key,
-                    "db": self.db,
-                    "namespace": self.namespace,
-                    "size": data_len, # Use original size for metadata
-                    "ttl": None
-                }
-                if tags:
-                    metadata["tags"] = tags
-                self.metadata.set_metadata(metadata)
-                
-                # Check if we need to flush the buffer for non-Redis
-                self.flush_if_needed()
+                    self.metadata.set_metadata(metadata)
+                    
+                    # Update indexes
+                    if self.index_manager:
+                        self.index_manager.add_key_to_indexes(key, tags or [], metadata)
+                    
+                    # Check if we need to flush the buffer for non-Redis
+                    self.flush_if_needed()
             
-        duration_ms = (time.time() - start_time) * 1000
-        self.metrics.record_operation('set', duration_ms, data_len)
+            if self.perf_logger:
+                self.perf_logger.end_operation(op_id, success=True)
+            
+        except Exception as e:
+            if self.perf_logger:
+                self.perf_logger.end_operation(op_id, success=False, error=str(e))
+            self.logger.error(f"Failed to set key {key}: {e}")
+            raise
             
     def set_with_ttl(self, key: str, value: bytes, ttl_seconds: int, tags: list = None):
         """Set a key-value pair with a time-to-live.
@@ -1024,36 +1104,49 @@ class KeyValueStore:
         Raises:
             KeyError: If key doesn't exist
         """
-        start_time = time.time()
+        op_id = f"delete_{key}_{int(time.time() * 1000)}"
+        if self.perf_logger:
+            self.perf_logger.start_operation(op_id, "delete", key=key)
         
-        with self._get_lock(key):
-            # Remove from buffer if it exists
-            if key in self.buffer:
-                size = len(self.buffer[key])
-                del self.buffer[key]
-                self.current_buffer_size -= size
-                
-            # Get metadata
-            if self.is_redis_backend:
-                metadata = self.storage.get_metadata(key, self.db, self.namespace)
-            else:
-                metadata = self.metadata.get_metadata(key, self.db, self.namespace)
-                
-            if not metadata:
-                return  # Key doesn't exist, nothing to do
-                
-            # Delete the file if it exists using storage backend
-            path = metadata["path"]
-            self.storage.delete_file(path)
-                
-            # Delete metadata
-            if self.is_redis_backend:
-                self.storage.delete_metadata(key, self.db, self.namespace)
-            else:
-                self.metadata.delete_metadata(key, self.db, self.namespace)
+        try:
+            with self._get_lock(key):
+                # Remove from buffer if it exists
+                if key in self.buffer:
+                    size = len(self.buffer[key])
+                    del self.buffer[key]
+                    self.current_buffer_size -= size
+                    
+                # Get metadata
+                if self.is_redis_backend:
+                    metadata = self.storage.get_metadata(key, self.db, self.namespace)
+                else:
+                    metadata = self.metadata.get_metadata(key, self.db, self.namespace)
+                    
+                if not metadata:
+                    return  # Key doesn't exist, nothing to do
+                    
+                # Remove from indexes
+                if self.index_manager:
+                    self.index_manager.remove_key_from_indexes(key)
+                    
+                # Delete the file if it exists using storage backend
+                path = metadata["path"]
+                self.storage.delete_file(path)
+                    
+                # Delete metadata
+                if self.is_redis_backend:
+                    self.storage.delete_metadata(key, self.db, self.namespace)
+                else:
+                    self.metadata.delete_metadata(key, self.db, self.namespace)
             
-        duration_ms = (time.time() - start_time) * 1000
-        self.metrics.record_operation('delete', duration_ms)
+            if self.perf_logger:
+                self.perf_logger.end_operation(op_id, success=True)
+            
+        except Exception as e:
+            if self.perf_logger:
+                self.perf_logger.end_operation(op_id, success=False, error=str(e))
+            self.logger.error(f"Failed to delete key {key}: {e}")
+            raise
             
     def _get_lock(self, key: str):
         """Get a lock for the specified key."""
@@ -1429,13 +1522,182 @@ class KeyValueStore:
                 'performance': self.metrics.get_metrics()
             }
             
+            # Add advanced feature stats
+            if self.index_manager:
+                stats['index_stats'] = self.index_manager.get_index_stats()
+                stats['cache_stats'] = self.index_manager.get_cache_stats()
+                stats['query_stats'] = self.index_manager.get_query_stats()
+            
+            if self.transaction_manager:
+                stats['active_transactions'] = len(self.transaction_manager.get_active_transactions())
+            
             return stats
+    
+    # Transaction Methods
+    def transaction(self, isolation_level: str = "READ_COMMITTED"):
+        """Create a transaction context manager."""
+        if not self.transaction_manager:
+            raise RuntimeError("Transactions not enabled for this store")
+        return self.transaction_manager.transaction(isolation_level)
+    
+    def begin_transaction(self, isolation_level: str = "READ_COMMITTED"):
+        """Begin a new transaction."""
+        if not self.transaction_manager:
+            raise RuntimeError("Transactions not enabled for this store")
+        return self.transaction_manager.begin_transaction(isolation_level)
+    
+    def commit_transaction(self, transaction):
+        """Commit a transaction."""
+        if not self.transaction_manager:
+            raise RuntimeError("Transactions not enabled for this store")
+        return self.transaction_manager.commit_transaction(transaction)
+    
+    def rollback_transaction(self, transaction):
+        """Rollback a transaction."""
+        if not self.transaction_manager:
+            raise RuntimeError("Transactions not enabled for this store")
+        return self.transaction_manager.rollback_transaction(transaction)
+    
+    # Backup Methods
+    def create_backup(self, backup_id: Optional[str] = None, compression: bool = True):
+        """Create a full backup."""
+        if not self.backup_manager:
+            raise RuntimeError("Backup not enabled for this store")
+        return self.backup_manager.create_full_backup(backup_id, compression)
+    
+    def create_incremental_backup(self, parent_backup_id: str, backup_id: Optional[str] = None, compression: bool = True):
+        """Create an incremental backup."""
+        if not self.backup_manager:
+            raise RuntimeError("Backup not enabled for this store")
+        return self.backup_manager.create_incremental_backup(parent_backup_id, backup_id, compression)
+    
+    def restore_backup(self, backup_id: str, verify_integrity: bool = True, clear_existing: bool = False):
+        """Restore from a backup."""
+        if not self.backup_manager:
+            raise RuntimeError("Backup not enabled for this store")
+        return self.backup_manager.restore_backup(backup_id, verify_integrity, clear_existing)
+    
+    def list_backups(self):
+        """List all available backups."""
+        if not self.backup_manager:
+            raise RuntimeError("Backup not enabled for this store")
+        return self.backup_manager.list_backups()
+    
+    def verify_backup(self, backup_id: str):
+        """Verify backup integrity."""
+        if not self.backup_manager:
+            raise RuntimeError("Backup not enabled for this store")
+        return self.backup_manager.verify_backup_integrity(backup_id)
+    
+    # Advanced Query Methods
+    def query_by_tags_advanced(self, tags: List[str], operator: str = "AND", page: int = 1, page_size: int = 100):
+        """Advanced tag query with pagination."""
+        if not self.index_manager:
+            # Fallback to original method
+            results = self.query_by_tags(tags)
+            keys = list(results.keys())
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            return {
+                'keys': keys[start_idx:end_idx],
+                'total_count': len(keys),
+                'page': page,
+                'page_size': page_size,
+                'has_more': end_idx < len(keys)
+            }
+        
+        if INDEXING_AVAILABLE:
+            query_op = QueryOperator.AND if operator.upper() == "AND" else QueryOperator.OR
+            return self.index_manager.query_by_tags(tags, query_op, page, page_size)
+        else:
+            # Fallback if indexing not available
+            results = self.query_by_tags(tags)
+            keys = list(results.keys())
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            return {
+                'keys': keys[start_idx:end_idx],
+                'total_count': len(keys),
+                'page': page,
+                'page_size': page_size,
+                'has_more': end_idx < len(keys)
+            }
+    
+    def complex_query(self, conditions: List[Dict[str, Any]], page: int = 1, page_size: int = 100):
+        """Execute complex queries with multiple conditions."""
+        if not self.index_manager:
+            raise RuntimeError("Advanced querying not enabled for this store")
+        
+        if not INDEXING_AVAILABLE:
+            raise RuntimeError("Advanced indexing features not available")
+        
+        from index_manager import QueryCondition, QueryOperator
+        
+        # Convert dict conditions to QueryCondition objects
+        query_conditions = []
+        for cond in conditions:
+            operator = QueryOperator(cond.get('operator', 'and'))
+            query_conditions.append(QueryCondition(
+                field=cond['field'],
+                operator=operator,
+                value=cond.get('value'),
+                values=cond.get('values'),
+                min_value=cond.get('min_value'),
+                max_value=cond.get('max_value')
+            ))
+        
+        return self.index_manager.complex_query(query_conditions, page, page_size)
+    
+    def optimize_indexes(self):
+        """Optimize indexes based on usage patterns."""
+        if self.index_manager:
+            self.index_manager.optimize_indexes()
+    
+    def rebuild_indexes(self):
+        """Rebuild all indexes from scratch."""
+        if self.index_manager:
+            self.index_manager.rebuild_indexes()
+    
+    def clear_caches(self):
+        """Clear all caches."""
+        if self.index_manager:
+            self.index_manager.clear_caches()
+    
+    def get_all_keys(self) -> List[str]:
+        """Get all keys from the store (for backup purposes)."""
+        try:
+            if self.is_redis_backend:
+                results = self.storage.query_metadata({
+                    'db': self.db,
+                    'namespace': self.namespace
+                })
+            else:
+                results = self.metadata.query_metadata({
+                    'db': self.db,
+                    'namespace': self.namespace
+                })
+            return [r['key'] for r in results]
+        except Exception as e:
+            self.logger.error(f"Failed to get all keys: {e}")
+            return []
 
     def close(self):
         """Close the store and all resources."""
         self.flush()
-        # Close all database connections
-        self.metadata.close_connections()
+        
+        # Close database connections
+        if self.metadata:
+            self.metadata.close_connections()
+        
+        # Close storage connections
+        if hasattr(self.storage, 'close_connections'):
+            self.storage.close_connections()
+        
+        # Clean up managers
+        if self.transaction_manager:
+            self.transaction_manager.cleanup_stale_transactions(0)  # Clean all
+        
+        self.logger.info(f"KeyValueStore {self.db}.{self.namespace} closed")
 
 
 if __name__ == '__main__':
@@ -1456,7 +1718,10 @@ if __name__ == '__main__':
                 buffer_size_mb=1,
                 namespace="default",
                 sync=sync_manager,
-                compression_enabled=True
+                compression_enabled=True,
+                enable_transactions=False,  # Disable advanced features for basic example
+                enable_backup=False,
+                enable_indexing=False
             )
             
             print("Testing basic key-value operations...")
