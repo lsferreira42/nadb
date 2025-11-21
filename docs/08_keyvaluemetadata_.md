@@ -22,6 +22,8 @@ Think of `KeyValueMetadata` as NADB's **index card system** specifically for the
 
 **What about Redis?** When you use the `RedisStorage` backend, metadata is handled differently. Redis has its own ways of storing extra information (like using Redis Hashes) and managing expirations (native TTL). In this case, the `RedisStorage` backend itself manages metadata directly within Redis, and the `KeyValueMetadata` class we're discussing here is generally *not* used.
 
+*   **Note (v2.2.0):** NADB now uses a **unified metadata interface** that works transparently with both backends. The `KeyValueStore` automatically detects backend capabilities and routes metadata operations appropriately - to `KeyValueMetadata` (SQLite) for filesystem backend, or to the backend itself for Redis. This abstraction is explained in [Chapter 13: Backend Capabilities System](13_backend_capabilities_system.md).
+
 ## The Role of KeyValueMetadata
 
 You typically won't interact with `KeyValueMetadata` directly in your code. It works silently behind the scenes, coordinated by the [KeyValueStore](01_keyvaluestore_.md) and the [KeyValueSync](07_keyvaluesync_.md) assistant (when using the filesystem backend).

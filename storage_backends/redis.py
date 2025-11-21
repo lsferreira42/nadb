@@ -6,17 +6,16 @@ Redis is used both for storing the data and the metadata, enabling distributed s
 """
 import os
 import logging
-import zlib
 import json
 import time
 import random
 from datetime import datetime, timedelta
+from typing import Optional, Dict, Any, List
 import redis
 from redis.connection import ConnectionPool
 
-# Constants for compression
-COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
-COMPRESS_LEVEL = 6  # Medium compression (range is 0-9)
+import zlib
+from storage_backends.base import StorageBackend, BackendCapabilities, COMPRESS_MIN_SIZE, COMPRESS_LEVEL
 
 # Redis connection parameters
 DEFAULT_CONNECTION_TIMEOUT = 5.0  # Default connection timeout in seconds
@@ -28,11 +27,14 @@ INITIAL_RETRY_DELAY = 0.5  # Initial retry delay in seconds
 DEFAULT_POOL_SIZE = 10  # Default maximum connections in pool
 DEFAULT_POOL_TIMEOUT = 20  # Default timeout for getting connection from pool
 
-class RedisStorage:
-    """Redis storage backend for NADB key-value store."""
-    
-    def __init__(self, base_path=None, host='localhost', port=6379, db=0, password=None, 
-                 socket_timeout=DEFAULT_SOCKET_TIMEOUT, 
+class RedisStorage(StorageBackend):
+    """Redis storage backend for NADB key-value store with metadata support."""
+
+    # Default batch size for SCAN operations
+    SCAN_BATCH_SIZE = 100
+
+    def __init__(self, base_path=None, host='localhost', port=6379, db=0, password=None,
+                 socket_timeout=DEFAULT_SOCKET_TIMEOUT,
                  connection_timeout=DEFAULT_CONNECTION_TIMEOUT,
                  max_connections=DEFAULT_POOL_SIZE,
                  connection_pool_timeout=DEFAULT_POOL_TIMEOUT, **kwargs):
@@ -86,7 +88,23 @@ class RedisStorage:
         self.ttl_set = "nadb:ttl"
         
         self.logger.info(f"Redis storage initialized with pool: {host}:{port} DB:{db} (max_connections={max_connections})")
-    
+
+    def get_capabilities(self) -> BackendCapabilities:
+        """Get the capabilities of the Redis storage backend."""
+        return BackendCapabilities(
+            supports_buffering=False,  # Redis is fast, no need for buffering
+            supports_native_ttl=True,  # Redis has native EXPIRE command
+            supports_transactions=True,  # Redis has MULTI/EXEC
+            supports_metadata=True,  # Redis stores metadata in hashes
+            supports_atomic_writes=True,  # Redis operations are atomic
+            write_strategy="immediate",  # Write directly to Redis
+            is_distributed=True,  # Redis is networked
+            is_persistent=True,  # Redis can persist (RDB/AOF)
+            supports_compression=True,  # Can compress before storing
+            supports_native_queries=False,  # Limited query support (scans)
+            max_value_size_bytes=512 * 1024 * 1024  # 512MB default Redis limit
+        )
+
     def _connect(self):
         """
         Connect to Redis server with connection pooling and exponential backoff for retries.
@@ -455,26 +473,57 @@ class RedisStorage:
     def _is_compressed(self, data):
         """
         Check if data has the compression header.
-        
+
         Args:
             data: Binary data to check
-            
+
         Returns:
             True if data is compressed, False otherwise
         """
         return data and data.startswith(b'CMP:')
-    
+
     def _should_compress(self, data):
         """
         Determine if data should be compressed based on size.
-        
+
         Args:
             data: Binary data to check
-            
+
         Returns:
             True if data should be compressed, False otherwise
         """
         return len(data) > COMPRESS_MIN_SIZE
+
+    def _scan_keys(self, pattern: str, count: int = None) -> List[bytes]:
+        """
+        Scan for keys matching pattern using SCAN (O(1) per call) instead of KEYS (O(N)).
+
+        This is the recommended way to iterate through keys in production
+        as it doesn't block Redis for extended periods.
+
+        Args:
+            pattern: Glob-style pattern to match keys
+            count: Hint for number of keys to return per iteration
+
+        Returns:
+            List of matching keys
+        """
+        if count is None:
+            count = self.SCAN_BATCH_SIZE
+
+        keys = []
+        cursor = 0
+
+        try:
+            while True:
+                cursor, batch = self.redis.scan(cursor=cursor, match=pattern, count=count)
+                keys.extend(batch)
+                if cursor == 0:
+                    break
+        except redis.RedisError as e:
+            self.logger.error(f"Error scanning keys with pattern {pattern}: {e}")
+
+        return keys
     
     # Metadata operations (replacing SQLite functionality)
     
@@ -677,9 +726,10 @@ class RedisStorage:
             # Pattern for matching keys in this db and namespace
             pattern = f"{self.meta_prefix}{db}:{namespace}:*"
             self.logger.debug(f"Looking for pattern: {pattern}")
-            
+
             # First, get all keys matching the db and namespace pattern
-            all_meta_keys = self.redis.keys(pattern)
+            # Using SCAN instead of KEYS for better performance in production
+            all_meta_keys = self._scan_keys(pattern)
             self.logger.debug(f"Found {len(all_meta_keys)} keys matching pattern {pattern}")
             
             # Approach changes based on if we have tags or not
@@ -778,9 +828,22 @@ class RedisStorage:
     def close_connections(self):
         """Close connection pool and cleanup resources."""
         try:
+            # Close the Redis client first
+            if hasattr(self, 'redis') and self.redis:
+                try:
+                    self.redis.close()
+                except Exception:
+                    pass  # Ignore errors when closing client
+
+            # Then disconnect the pool
             if self.connection_pool:
-                self.connection_pool.disconnect()
+                try:
+                    self.connection_pool.disconnect()
+                except Exception:
+                    pass  # Ignore errors when disconnecting pool
                 self.connection_pool = None
+
+            self.redis = None
             self.connected = False
             self.logger.info("Redis connection pool closed")
         except Exception as e:
@@ -879,10 +942,3 @@ class RedisStorage:
             self.logger.error(f"Redis error in cleanup_expired: {str(e)}")
             return []
     
-    def close_connections(self):
-        """Close Redis connection."""
-        try:
-            if hasattr(self, 'redis'):
-                self.redis.close()
-        except redis.RedisError as e:
-            self.logger.error(f"Redis error in close_connections: {str(e)}")

@@ -150,7 +150,7 @@ Let's peek at some (simplified) internal code snippets from `nakv.py`:
 **Initialization (`__init__`)**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.__init__
+# Simplified from nakv.py - KeyValueStore.__init__ (v2.2.0)
 class KeyValueStore:
     def __init__(self, data_folder_path: str, db: str, buffer_size_mb: float,
                  namespace: str, sync: KeyValueSync, storage_backend: str = "fs"):
@@ -165,58 +165,73 @@ class KeyValueStore:
         # See Chapter 4 & 5
         self.storage = StorageFactory.create_storage(storage_backend, ...)
 
-        # Manages metadata (unless using a backend like Redis that handles it)
+        # NEW in v2.2.0: Get backend capabilities
+        self.capabilities = self.storage.get_capabilities()
+
+        # Determine if we should use buffering based on backend capabilities
+        self.use_buffering = self.capabilities.supports_buffering and \
+                            self.capabilities.write_strategy != "immediate"
+
+        # Manages metadata (unless backend supports it natively)
         # See Chapter 8
-        self.metadata = KeyValueMetadata(...) # Or potentially None
+        if not self.capabilities.supports_metadata:
+            self.metadata = KeyValueMetadata(...) # SQLite for FS backend
+        else:
+            self.metadata = None # Redis handles metadata internally
 
         # ... other setup ...
         self.sync = sync
         sync.register_store(self) # Tell the sync manager about this store
 ```
 
-When you create a `KeyValueStore`, it sets up its internal `buffer`, figures out which [Storage Backend](05_storage_backends__filesystemstorage__redisstorage_.md) to use via the [StorageFactory](04_storagefactory_.md), and initializes the [Metadata Store](08_keyvaluemetadata_.md) if needed. It also registers itself with the `KeyValueSync` process.
+When you create a `KeyValueStore`, it sets up its internal `buffer`, figures out which [Storage Backend](13_backend_capabilities_system.md) to use via the [StorageFactory](04_storagefactory_.md), and **queries the backend's capabilities** (new in v2.2.0). Based on these capabilities, it automatically adapts its behavior - for example, using buffering for filesystem but writing immediately for Redis.
 
 **Storing Data (`set`)**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.set
+# Simplified from nakv.py - KeyValueStore.set (v2.2.0)
 def set(self, key: str, value: bytes, tags: list = None):
-    # ... (Type checks) ...
+    # ... (Input validation) ...
     with self._get_lock(key): # Ensures only one thread modifies this key at a time
-        # Check if using a backend that writes immediately (like Redis)
-        if self.is_redis_backend:
-            # Write directly to storage backend
-            data_to_write = self._compress_data(value)
-            success = self.storage.write_data(path, data_to_write)
-            if success:
-                # Update metadata via storage backend
-                self.storage.set_metadata(...)
+        # NEW in v2.2.0: Unified write strategies
+        if self.use_buffering:
+            # Strategy 1: Buffered write (filesystem backend)
+            self._buffered_set(key, value, tags)
         else:
-            # Add to the in-memory buffer
-            self.buffer[key] = value
-            self.current_buffer_size += len(value)
-            # Update metadata (e.g., in SQLite)
-            self.metadata.set_metadata(...)
-            # Check if the buffer is full and needs flushing
-            self.flush_if_needed()
+            # Strategy 2: Immediate write (Redis backend)
+            self._immediate_set(key, value, tags)
     # ... (Record performance metrics) ...
+
+def _buffered_set(self, key: str, value: bytes, tags: list = None):
+    """Buffered write - add to memory buffer first."""
+    self.buffer[key] = value
+    self.current_buffer_size += len(value)
+    self._set_metadata(...)  # Unified metadata interface
+    self.flush_if_needed()
+
+def _immediate_set(self, key: str, value: bytes, tags: list = None):
+    """Immediate write - write directly to storage."""
+    data_to_write = self._compress_data(value)
+    self.storage.write_data(path, data_to_write)
+    self._set_metadata(...)  # Unified metadata interface
 ```
 
-The `set` method first acquires a lock for the specific key to prevent conflicts. Then, depending on the backend, it either writes the data directly (like Redis) or adds it to the `buffer`. It updates the metadata and might trigger a flush if the buffer gets too big.
+The `set` method now uses **unified write strategies** (v2.2.0). Instead of checking backend type, it consults `self.use_buffering` (determined by backend capabilities) and calls the appropriate strategy method. Both strategies use a unified `_set_metadata()` interface that works regardless of backend.
 
 **Getting Data (`get`)**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.get
+# Simplified from nakv.py - KeyValueStore.get (v2.2.0)
 def get(self, key: str):
-    # ... (Start timer) ...
+    # ... (Input validation, start timer) ...
     with self._get_lock(key):
         # 1. Check the fast in-memory buffer first
         if key in self.buffer:
             return self.buffer[key]
 
         # 2. If not in buffer, check metadata to see if key exists
-        metadata = self.metadata.get_metadata(key, ...) # Or self.storage.get_metadata for Redis
+        # NEW in v2.2.0: Unified metadata interface
+        metadata = self._get_metadata(key) # Works for all backends
 
         if not metadata:
             raise KeyError(f"Key '{key}' not found") # Key doesn't exist
@@ -232,7 +247,7 @@ def get(self, key: str):
     return value
 ```
 
-The `get` method also uses a lock. It smartly checks the fast memory `buffer` first. If the data isn't there, it consults the metadata to find where the data is stored, reads it from the [Storage Backend](05_storage_backends__filesystemstorage__redisstorage_.md), decompresses it if necessary, and returns it.
+The `get` method uses a lock and smartly checks the fast memory `buffer` first. If data isn't there, it uses the **unified metadata interface** `_get_metadata()` (v2.2.0) which works identically for all backends. It then reads from the [Storage Backend](13_backend_capabilities_system.md), decompresses if necessary, and returns the value.
 
 ## Conclusion
 

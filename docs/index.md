@@ -1,8 +1,31 @@
 # Tutorial: nadb
 
-NADB is a simple **key-value store** library for Python. Think of it like a dictionary where you can save data using a *key* (a label) and retrieve it later.
+NADB is an enterprise-grade **key-value store** library for Python. Think of it like a dictionary where you can save data using a *key* (a label) and retrieve it later.
 It automatically saves your data to disk (*persistence*) or can use faster backends like Redis.
 It supports features like adding **tags** to categorize data, setting an expiration time (**TTL**), and handling binary data efficiently.
+
+## Security & Stability (v2.1.0)
+
+This version includes important security and stability improvements:
+
+- **Path Traversal Protection** - Filesystem backend validates all paths
+- **SQL Injection Prevention** - LIKE patterns are sanitized
+- **Input Validation** - All public APIs validate inputs
+- **Race Condition Fixes** - Atomic buffer operations
+- **Memory Leak Prevention** - Automatic lock cleanup
+- **Redis SCAN** - Production-safe key iteration
+- **Abstract Storage Interface** - Consistent backend APIs
+- **Complete Transaction Rollback** - Restores tags and TTL
+
+## Architecture Improvements (v2.2.0)
+
+Version 2.2.0 introduces a capabilities-based architecture:
+
+- **Backend Capabilities System** - Self-describing backends
+- **Unified Write Strategies** - Consistent behavior across backends
+- **Automatic Adaptation** - KeyValueStore adapts to backend features
+- **Clean Codebase** - No more backend-specific conditionals
+- **Easy Extensibility** - Simple to add new storage backends
 
 
 **Source Repository:** [https://github.com/lsferreira42/nadb](https://github.com/lsferreira42/nadb)
@@ -64,6 +87,8 @@ flowchart TD
 ](11_indexing_caching_.md)
 12. [Advanced Features: Structured Logging
 ](12_structured_logging_.md)
+13. [Backend Capabilities System (v2.2.0)
+](13_backend_capabilities_system.md)
 
 
 ---

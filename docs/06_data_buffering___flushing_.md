@@ -31,7 +31,7 @@ NADB automatically flushes the buffer under two main conditions:
 
 This combination ensures that writes feel fast (buffering) but data doesn't stay unsafe in memory for too long (flushing).
 
-*   **Note:** While `FileSystemStorage` relies heavily on this buffer, `RedisStorage` often writes data more directly to the Redis server. Redis itself has its own internal mechanisms for performance and durability. Therefore, the `buffer_size_mb` setting might have less impact when using the Redis backend for standard `set` operations.
+*   **Note (v2.2.0):** NADB now automatically adapts based on **backend capabilities**. `FileSystemStorage` declares that it supports buffering (`supports_buffering=True, write_strategy="buffered"`), so KeyValueStore enables the buffer. `RedisStorage` declares `supports_buffering=False, write_strategy="immediate"`, so KeyValueStore writes directly to Redis. This automatic adaptation is explained in [Chapter 13: Backend Capabilities System](13_backend_capabilities_system.md).
 
 ## Configuring the Buffer
 
@@ -138,7 +138,7 @@ Let's look at simplified code snippets from `nakv.py` that handle this.
 **Initialization (`KeyValueStore.__init__`)**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.__init__
+# Simplified from nakv.py - KeyValueStore.__init__ (v2.2.0)
 class KeyValueStore:
     def __init__(self, data_folder_path: str, db: str, buffer_size_mb: float,
                  namespace: str, sync: KeyValueSync, storage_backend: str = "fs", ...):
@@ -146,16 +146,22 @@ class KeyValueStore:
         self.buffer_size_mb = buffer_size_mb
         self.buffer = {}  # The actual buffer dictionary
         self.current_buffer_size = 0 # Tracks buffer usage in bytes
-        self.is_redis_backend = storage_backend == "redis"
 
         # Storage backend (e.g., FileSystemStorage)
         self.storage = StorageFactory.create_storage(...)
 
-        # Metadata handler (e.g., KeyValueMetadata for SQLite)
-        if not self.is_redis_backend:
-            self.metadata = KeyValueMetadata(...)
+        # NEW in v2.2.0: Get backend capabilities
+        self.capabilities = self.storage.get_capabilities()
+
+        # Determine write strategy based on capabilities
+        self.use_buffering = self.capabilities.supports_buffering and \
+                            self.capabilities.write_strategy != "immediate"
+
+        # Metadata handler (based on backend capabilities)
+        if not self.capabilities.supports_metadata:
+            self.metadata = KeyValueMetadata(...) # SQLite for FS
         else:
-            self.metadata = None # Redis handles metadata differently
+            self.metadata = None # Redis handles metadata natively
 
         # Register with the sync manager for timed flushes
         self.sync = sync
@@ -163,35 +169,38 @@ class KeyValueStore:
         # ...
 ```
 
-The constructor sets up the empty `buffer` dictionary, the `current_buffer_size` counter, and stores the `buffer_size_mb` limit you provided.
+The constructor sets up the empty `buffer` dictionary, the `current_buffer_size` counter, and stores the `buffer_size_mb` limit. **In v2.2.0**, it also queries backend capabilities and sets `self.use_buffering` accordingly.
 
 **Setting Data (`KeyValueStore.set`)**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.set (Filesystem Backend Case)
+# Simplified from nakv.py - KeyValueStore.set (v2.2.0)
 def set(self, key: str, value: bytes, tags: list = None):
-    # ... (Type checks and locking) ...
-    data_len = len(value)
-
-    if self.is_redis_backend:
-        # Redis backend writes immediately (covered in Chapter 5)
-        # ... Redis-specific write logic ...
-    else:
-        # Filesystem backend uses buffering:
-        # 1. Add to buffer
-        self.buffer[key] = value
-        self.current_buffer_size += data_len
-
-        # 2. Update metadata immediately (in SQLite)
-        metadata_dict = { "path": ..., "key": key, "size": data_len, "tags": tags }
-        self.metadata.set_metadata(metadata_dict)
-
-        # 3. Check if buffer needs flushing due to size
-        self.flush_if_needed()
+    # ... (Input validation and locking) ...
+    with self._get_lock(key):
+        # NEW in v2.2.0: Unified write strategies
+        if self.use_buffering:
+            # Use buffered write strategy
+            self._buffered_set(key, value, tags)
+        else:
+            # Use immediate write strategy
+            self._immediate_set(key, value, tags)
     # ... (Record metrics) ...
+
+def _buffered_set(self, key: str, value: bytes, tags: list = None):
+    """Buffered write - filesystem backend."""
+    # 1. Add to buffer
+    self.buffer[key] = value
+    self.current_buffer_size += len(value)
+
+    # 2. Update metadata (unified interface)
+    self._set_metadata({ "path": ..., "key": key, "size": ..., "tags": tags })
+
+    # 3. Check if buffer needs flushing due to size
+    self.flush_if_needed()
 ```
 
-For the filesystem backend, `set` adds the data to `self.buffer`, updates the size counter, updates the metadata (usually happens right away), and then checks if a flush is needed.
+**In v2.2.0**, the `set` method uses capabilities-based write strategies instead of checking backend type. When buffering is enabled (`self.use_buffering=True` for filesystem), it calls `_buffered_set()` which adds data to the buffer and checks if flushing is needed.
 
 **Checking Flush Condition (`KeyValueStore.flush_if_needed`)**
 

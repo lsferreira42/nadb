@@ -13,7 +13,9 @@ TTL lets you set an **expiration time** (in seconds) for a key-value pair when y
 After the specified number of seconds passes, NADB will automatically recognize that the data is expired.
 
 *   If you're using the **FileSystemStorage** backend (the default), the background [KeyValueSync](07_keyvaluesync_.md) process will periodically check the [KeyValueMetadata](08_keyvaluemetadata_.md) and remove the expired key and its associated data file.
-*   If you're using the **RedisStorage** backend, Redis itself handles the expiration automatically.
+*   If you're using the **RedisStorage** backend, Redis itself handles the expiration automatically using its native EXPIRE command.
+
+*   **Note (v2.2.0):** NADB automatically detects backend capabilities and uses the optimal TTL strategy for each backend. Redis uses native TTL (`supports_native_ttl=True`), while the filesystem backend tracks TTL in metadata. This automatic adaptation is explained in [Chapter 13: Backend Capabilities System](13_backend_capabilities_system.md).
 
 This is incredibly useful for things like:
 
@@ -139,10 +141,10 @@ sequenceDiagram
 
 Let's look at simplified snippets.
 
-**Inside `KeyValueStore.set_with_ttl` (from `nakv.py`):**
+**Inside `KeyValueStore.set_with_ttl` (from `nakv.py` - v2.2.0):**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.set_with_ttl
+# Simplified from nakv.py - KeyValueStore.set_with_ttl (v2.2.0)
 def set_with_ttl(self, key: str, value: bytes, ttl_seconds: int, tags: list = None):
     # ... (Input checks) ...
     start_time = time.time()
@@ -160,28 +162,25 @@ def set_with_ttl(self, key: str, value: bytes, ttl_seconds: int, tags: list = No
         if tags:
             metadata["tags"] = tags
 
-        if self.is_redis_backend:
-            # Redis handles TTL natively, write data immediately
+        # NEW in v2.2.0: Unified write strategies based on capabilities
+        if self.use_buffering:
+            # Buffered write (filesystem backend)
+            self.buffer[key] = value
+            self.current_buffer_size += len(value)
+            self._set_metadata(metadata)  # Unified metadata interface!
+            self.flush_if_needed()
+        else:
+            # Immediate write (Redis backend)
             path = metadata["path"]
             data_to_write = self._compress_data(value)
             success = self.storage.write_data(path, data_to_write)
             if success:
-                # Pass metadata (with TTL) to Redis storage backend
-                # It will set TTL on both data and metadata keys in Redis
-                self.storage.set_metadata(metadata)
-        else:
-            # Filesystem backend: Add to buffer and update SQLite metadata
-            self.buffer[key] = value # Add data to buffer
-            self.current_buffer_size += len(value)
-            # Pass metadata (with TTL) to the SQLite metadata handler
-            self.metadata.set_metadata(metadata)
-            # Check if buffer needs flushing
-            self.flush_if_needed()
+                self._set_metadata(metadata)  # Unified metadata interface!
 
     # ... (Record metrics) ...
 ```
 
-This method is similar to `set()`, but it crucially includes the `ttl_seconds` in the `metadata` dictionary. It then passes this metadata (including the TTL) to the appropriate handler (`self.storage.set_metadata` for Redis, which sets the native Redis TTL, or `self.metadata.set_metadata` for the filesystem backend, which stores the TTL value in SQLite).
+This method is similar to `set()`, but it crucially includes the `ttl_seconds` in the `metadata` dictionary. In v2.2.0, it uses the **unified write strategies** based on backend capabilities and calls `_set_metadata()` which works for all backends (routes to `self.storage.set_metadata()` for Redis or `self.metadata.set_metadata()` for filesystem).
 
 **Inside `KeyValueMetadata.set_metadata` (for FS/SQLite, simplified from `nakv.py`):**
 
@@ -229,18 +228,19 @@ def _cleanup_expired_entries(self):
 
 The `KeyValueSync` process periodically calls this method. It iterates through all the `KeyValueStore` instances it manages and calls their `cleanup_expired()` method.
 
-**Inside `KeyValueStore.cleanup_expired` (from `nakv.py`):**
+**Inside `KeyValueStore.cleanup_expired` (from `nakv.py` - v2.2.0):**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.cleanup_expired
+# Simplified from nakv.py - KeyValueStore.cleanup_expired (v2.2.0)
 def cleanup_expired(self):
-    if self.is_redis_backend:
-        # Redis handles TTL mostly automatically, but we might do extra checks
+    # NEW in v2.2.0: Check capabilities for native TTL support
+    if self.capabilities.supports_native_ttl:
+        # Redis handles TTL automatically with EXPIRE
         expired = self.storage.cleanup_expired()
         return expired
     else:
-        # Filesystem backend: Ask SQLite metadata handler to find expired entries
-        expired_items = self.metadata.cleanup_expired() # Calls method below
+        # Filesystem backend: Ask metadata handler to find expired entries
+        expired_items = self._cleanup_expired_metadata()  # Calls unified method
 
         # Delete the actual data files for the expired items
         for item in expired_items:
@@ -250,9 +250,16 @@ def cleanup_expired(self):
             if item["key"] in self.buffer: del self.buffer[item["key"]]
 
         return expired_items
+
+def _cleanup_expired_metadata(self):
+    """Unified method that works with capabilities."""
+    if self.capabilities.supports_metadata:
+        return self.storage.cleanup_expired()
+    else:
+        return self.metadata.cleanup_expired()
 ```
 
-The store's `cleanup_expired` method delegates the work. For Redis, it relies mostly on the Redis backend's cleanup. For the filesystem, it first asks the `KeyValueMetadata` (SQLite) to find expired entries based on their stored TTL and timestamps, and then it explicitly deletes the associated data files from the disk.
+The store's `cleanup_expired` method now uses **backend capabilities** (v2.2.0). It checks `supports_native_ttl` instead of checking backend type. For Redis (native TTL), it relies on the backend's automatic cleanup. For the filesystem, it uses the unified metadata interface to find expired entries based on stored TTL and timestamps, then deletes the associated data files.
 
 **Inside `KeyValueMetadata.cleanup_expired` (for FS/SQLite, simplified from `nakv.py`):**
 
