@@ -87,6 +87,8 @@ flowchart TD
 ](11_indexing_caching_.md)
 12. [Advanced Features: Structured Logging
 ](12_structured_logging_.md)
+13. [Backend Capabilities System (v2.2.0)
+](13_backend_capabilities_system.md)
 
 
 ---

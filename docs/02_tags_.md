@@ -169,45 +169,45 @@ Let's look at simplified snippets showing how this works.
 **Inside `KeyValueStore.set` (from `nakv.py`):**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.set
+# Simplified from nakv.py - KeyValueStore.set (v2.2.0)
 def set(self, key: str, value: bytes, tags: list = None):
     # ... (Checks and locking) ...
 
-    # Store the actual data (value) using the storage backend
-    # (Could be buffered or written immediately depending on backend)
-    path = self._get_path(key)
-    data_to_write = self._compress_data(value)
-    success = self.storage.write_data(path, data_to_write) # Or add to buffer
+    # Prepare metadata dictionary including tags
+    metadata_dict = {
+        "path": self._get_path(key),
+        "key": key,
+        "db": self.db,
+        "namespace": self.namespace,
+        "size": len(value), # Store original size
+        "ttl": None,
+        # Include tags if provided!
+        "tags": tags if tags else []
+    }
 
-    if success or not self.is_redis_backend: # If buffered or write succeeded
-        # Prepare metadata dictionary
-        metadata_dict = {
-            "path": path,
-            "key": key,
-            "db": self.db,
-            "namespace": self.namespace,
-            "size": len(value), # Store original size
-            "ttl": None
-            # Include tags if provided!
-            "tags": tags if tags else []
-        }
+    # NEW in v2.2.0: Unified write strategies based on capabilities
+    if self.use_buffering:
+        # Buffered write (filesystem backend)
+        self.buffer[key] = value
+        self.current_buffer_size += len(value)
+        self._set_metadata(metadata_dict)  # Unified metadata interface!
+        self.flush_if_needed()
+    else:
+        # Immediate write (Redis backend)
+        data_to_write = self._compress_data(value)
+        success = self.storage.write_data(path, data_to_write)
+        if success:
+            self._set_metadata(metadata_dict)  # Unified metadata interface!
 
-        # Store the metadata (including tags)
-        if self.is_redis_backend:
-             self.storage.set_metadata(metadata_dict)
-        else:
-             # Pass metadata (with tags) to the SQLite metadata handler
-             self.metadata.set_metadata(metadata_dict)
-
-    # ... (Flush buffer if needed, metrics) ...
+    # ... (Record metrics) ...
 ```
 
-The `set` method takes the optional `tags` list, includes it in the `metadata_dict`, and passes this dictionary to the appropriate metadata handler (`self.storage.set_metadata` for Redis or `self.metadata.set_metadata` for filesystem/SQLite).
+The `set` method takes the optional `tags` list, includes it in the `metadata_dict`. In v2.2.0, it uses **unified write strategies** and calls `_set_metadata()` which automatically routes to the correct metadata handler based on backend capabilities.
 
 **Inside `KeyValueStore.query_by_tags` (from `nakv.py`):**
 
 ```python
-# Simplified from nakv.py - KeyValueStore.query_by_tags
+# Simplified from nakv.py - KeyValueStore.query_by_tags (v2.2.0)
 def query_by_tags(self, tags: list):
     # ... (Start timer) ...
 
@@ -218,12 +218,8 @@ def query_by_tags(self, tags: list):
         "tags": tags # The list of tags to search for
     }
 
-    # Delegate the query to the appropriate metadata handler
-    if self.is_redis_backend:
-        results = self.storage.query_metadata(query)
-    else:
-        # Ask the SQLite metadata handler to find matching entries
-        results = self.metadata.query_metadata(query)
+    # NEW in v2.2.0: Unified metadata query interface
+    results = self._query_metadata(query)  # Works with all backends!
 
     # Format the results into the expected dictionary {key: metadata}
     keys_metadata = {}
@@ -234,7 +230,7 @@ def query_by_tags(self, tags: list):
     return keys_metadata
 ```
 
-This method simply packages the query criteria (including the `tags` list) and asks the relevant metadata handler (`self.storage` or `self.metadata`) to perform the actual search.
+This method packages the query criteria (including the `tags` list) and calls `_query_metadata()` which automatically routes to the correct metadata handler based on backend capabilities (v2.2.0).
 
 **Inside `KeyValueMetadata.query_metadata` (for SQLite backend, simplified):**
 
