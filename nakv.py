@@ -725,16 +725,22 @@ class KeyValueStore:
         
         # Initialize the storage backend
         self.storage = StorageFactory.create_storage(storage_backend, base_path=data_folder_path)
-        
-        # Check if we're using Redis backend
+
+        # Get backend capabilities
+        self.capabilities = self.storage.get_capabilities()
+
+        # DEPRECATED: Keep for backward compatibility (will be removed in v3.0)
         self.is_redis_backend = storage_backend == "redis"
-        
-        # Connect to the metadata database only if not using Redis
-        # For Redis, we'll use the storage's set_metadata method
-        if not self.is_redis_backend:
+
+        # Determine write strategy based on capabilities
+        self.use_buffering = self.capabilities.supports_buffering and \
+                            self.capabilities.write_strategy != "immediate"
+
+        # Connect to the metadata database only if backend doesn't support metadata
+        if not self.capabilities.supports_metadata:
             self.metadata = KeyValueMetadata(f'{db}_meta.db', data_folder_path)
         else:
-            # For Redis, we'll use the storage's metadata methods
+            # Backend handles metadata internally
             self.metadata = None
         
         # Setup metrics
@@ -816,6 +822,50 @@ class KeyValueStore:
     def _is_compressed(self, data: bytes) -> bool:
         """Check if data has the compression header."""
         return data and data.startswith(b'CMP:')
+
+    def _get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
+        """
+        Get metadata for a key (unified interface).
+
+        Returns metadata regardless of whether backend supports it or uses SQLite.
+        """
+        if self.capabilities.supports_metadata:
+            return self.storage.get_metadata(key, self.db, self.namespace)
+        else:
+            return self.metadata.get_metadata(key, self.db, self.namespace)
+
+    def _set_metadata(self, metadata: Dict[str, Any]) -> bool:
+        """
+        Set metadata for a key (unified interface).
+
+        Stores metadata regardless of whether backend supports it or uses SQLite.
+        """
+        if self.capabilities.supports_metadata:
+            return self.storage.set_metadata(metadata)
+        else:
+            return self.metadata.set_metadata(metadata)
+
+    def _delete_metadata(self, key: str) -> bool:
+        """
+        Delete metadata for a key (unified interface).
+
+        Deletes metadata regardless of whether backend supports it or uses SQLite.
+        """
+        if self.capabilities.supports_metadata:
+            return self.storage.delete_metadata(key, self.db, self.namespace)
+        else:
+            return self.metadata.delete_metadata(key, self.db, self.namespace)
+
+    def _query_metadata(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Query metadata (unified interface).
+
+        Queries metadata regardless of whether backend supports it or uses SQLite.
+        """
+        if self.capabilities.supports_metadata:
+            return self.storage.query_metadata(query)
+        else:
+            return self.metadata.query_metadata(query)
         
     def _flush_to_disk(self):
         """Write buffered data to disk with atomic buffer swap to prevent race conditions."""
@@ -858,13 +908,8 @@ class KeyValueStore:
                             "size": len(data_to_write),
                             "ttl": None  # Default no TTL
                         }
-
-                        if self.is_redis_backend:
-                            # Use Redis's metadata methods
-                            self.storage.set_metadata(metadata)
-                        else:
-                            # Use SQLite metadata
-                            self.metadata.set_metadata(metadata)
+                        # Use unified metadata interface
+                        self._set_metadata(metadata)
                     else:
                         # Track failed writes for re-adding
                         failed_items[key] = value
@@ -915,18 +960,90 @@ class KeyValueStore:
                     "namespace": self.namespace,
                     "size": len(data_to_write),
                 }
-                
-                if self.is_redis_backend:
-                    # Use Redis's metadata methods
-                    self.storage.set_metadata(metadata)
-                else:
-                    # Use SQLite metadata
-                    self.metadata.set_metadata(metadata)
+                # Use unified metadata interface
+                self._set_metadata(metadata)
                 
             return success
         except Exception as e:
             logging.error(f"Error writing key {key} to disk: {e}")
             return False
+
+    def _immediate_set(self, key: str, value: bytes, tags: List[str] = None, ttl: int = None):
+        """
+        Immediate write strategy - write directly to storage without buffering.
+
+        Used for backends like Redis that are fast and don't benefit from buffering.
+        """
+        data_len = len(value)
+        path = self._get_path(key)
+        data_to_write = self._compress_data(value)
+
+        # Write directly to storage
+        success = self.storage.write_data(path, data_to_write)
+        if not success:
+            self.logger.error(f"Immediate write failed for key {key}")
+            raise IOError(f"Failed to write key {key} to storage backend")
+
+        # Create and store metadata
+        metadata = {
+            "path": path,
+            "key": key,
+            "db": self.db,
+            "namespace": self.namespace,
+            "size": data_len,
+            "ttl": ttl
+        }
+        if tags:
+            metadata["tags"] = tags
+
+        self._set_metadata(metadata)
+
+        # Update indexes
+        if self.index_manager:
+            self.index_manager.add_key_to_indexes(key, tags or [], metadata)
+
+        # Remove from buffer if it exists (edge case)
+        with self.buffer_lock:
+            if key in self.buffer:
+                self.current_buffer_size -= len(self.buffer[key])
+                del self.buffer[key]
+
+    def _buffered_set(self, key: str, value: bytes, tags: List[str] = None, ttl: int = None):
+        """
+        Buffered write strategy - write to in-memory buffer first.
+
+        Used for backends like filesystem that benefit from batched writes.
+        """
+        data_len = len(value)
+
+        # Use buffer_lock to prevent race conditions with flush
+        with self.buffer_lock:
+            # Adjust size if key already exists
+            if key in self.buffer:
+                self.current_buffer_size -= len(self.buffer[key])
+            self.buffer[key] = value
+            self.current_buffer_size += data_len
+
+        # Update metadata
+        metadata = {
+            "path": self._get_path(key),
+            "key": key,
+            "db": self.db,
+            "namespace": self.namespace,
+            "size": data_len,
+            "ttl": ttl
+        }
+        if tags:
+            metadata["tags"] = tags
+
+        self._set_metadata(metadata)
+
+        # Update indexes
+        if self.index_manager:
+            self.index_manager.add_key_to_indexes(key, tags or [], metadata)
+
+        # Check if we need to flush the buffer
+        self.flush_if_needed()
 
     def set(self, key: str, value: bytes, tags: List[str] = None):
         """Set a key-value pair, optionally with tags.
@@ -950,138 +1067,67 @@ class KeyValueStore:
                 raise TypeError("Tags must be a list")
             if not all(isinstance(t, str) for t in tags):
                 raise TypeError("All tags must be strings")
-        
+
         op_id = f"set_{key}_{int(time.time() * 1000)}"
         if self.perf_logger:
             self.perf_logger.start_operation(op_id, "set", key=key, data_size=len(value))
-        
+
         try:
-            data_len = len(value)
-            
             with self._get_lock(key):
-                if self.is_redis_backend:
-                    path = self._get_path(key)
-                    data_to_write = self._compress_data(value)
-                    success = self.storage.write_data(path, data_to_write)
-                    if success:
-                        metadata = {
-                            "path": path,
-                            "key": key,
-                            "db": self.db,
-                            "namespace": self.namespace,
-                            "size": data_len,  # Use original size for metadata
-                            "ttl": None
-                        }
-                        if tags:
-                            metadata["tags"] = tags
-                        self.storage.set_metadata(metadata)
-                        
-                        # Update indexes
-                        if self.index_manager:
-                            self.index_manager.add_key_to_indexes(key, tags or [], metadata)
-                        
-                        # Remove from buffer if it exists
-                        if key in self.buffer:
-                             self.current_buffer_size -= len(self.buffer[key])
-                             del self.buffer[key]
-                    else:
-                        self.logger.error(f"Immediate Redis write failed for key {key}")
-                        raise IOError(f"Failed to write key {key} to Redis backend")
+                # Use write strategy based on backend capabilities
+                if self.use_buffering:
+                    self._buffered_set(key, value, tags)
                 else:
-                    # Original behavior for non-Redis backends (buffering)
-                    # Use buffer_lock to prevent race conditions with flush
-                    with self.buffer_lock:
-                        # Adjust size if key already exists
-                        if key in self.buffer:
-                            self.current_buffer_size -= len(self.buffer[key])
-                        self.buffer[key] = value
-                        self.current_buffer_size += data_len
+                    self._immediate_set(key, value, tags)
 
-                    # Update metadata (SQLite)
-                    metadata = {
-                        "path": self._get_path(key),
-                        "key": key,
-                        "db": self.db,
-                        "namespace": self.namespace,
-                        "size": data_len,
-                        "ttl": None
-                    }
-                    if tags:
-                        metadata["tags"] = tags
-                    self.metadata.set_metadata(metadata)
-
-                    # Update indexes
-                    if self.index_manager:
-                        self.index_manager.add_key_to_indexes(key, tags or [], metadata)
-
-                    # Check if we need to flush the buffer for non-Redis
-                    self.flush_if_needed()
-            
             if self.perf_logger:
                 self.perf_logger.end_operation(op_id, success=True)
-            
+
         except Exception as e:
             if self.perf_logger:
                 self.perf_logger.end_operation(op_id, success=False, error=str(e))
             self.logger.error(f"Failed to set key {key}: {e}")
             raise
             
-    def set_with_ttl(self, key: str, value: bytes, ttl_seconds: int, tags: list = None):
+    def set_with_ttl(self, key: str, value: bytes, ttl_seconds: int, tags: List[str] = None):
         """Set a key-value pair with a time-to-live.
-        
+
         Args:
             key: The key for the value
             value: Binary data to store
             ttl_seconds: Time to live in seconds
             tags: Optional list of tags for search/categorization
+
+        Raises:
+            TypeError: If value is not bytes
+            ValueError: If TTL is not a positive integer
         """
         if not isinstance(value, bytes):
             raise TypeError("Value must be bytes")
-            
+
         if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
             raise ValueError("TTL must be a positive integer")
-            
+
         start_time = time.time()
-        
-        with self._get_lock(key):
-            self.buffer[key] = value
-            self.current_buffer_size += len(value)
-            
-            # Update metadata with TTL
-            metadata = {
-                "path": self._get_path(key),
-                "key": key,
-                "db": self.db,
-                "namespace": self.namespace,
-                "size": len(value),
-                "ttl": ttl_seconds
-            }
-            
-            if tags:
-                metadata["tags"] = tags
-            
-            if self.is_redis_backend:
-                # For Redis backend, TTL requires setting the expiration on the actual key
-                # So we do need to write the data immediately in this case
-                path = self._get_path(key)
-                # Compress data if needed
-                data_to_write = self._compress_data(value)
-                # Write to storage directly
-                success = self.storage.write_data(path, data_to_write)
-                if success:
-                    # Use Redis's metadata methods (will set TTL on both data and metadata)
-                    self.storage.set_metadata(metadata)
-                    # Remove from buffer since it's already written
-                    del self.buffer[key]
-                    self.current_buffer_size -= len(value)
-            else:
-                # Use SQLite metadata for other backends
-                self.metadata.set_metadata(metadata)
-                # Check if we need to flush
-                self.flush_if_needed()
-            
-        duration_ms = (time.time() - start_time) * 1000
-        self.metrics.record_operation('set_with_ttl', duration_ms, len(value))
+
+        try:
+            with self._get_lock(key):
+                # TTL always uses immediate write (even on FS backend)
+                # This ensures TTL tracking starts immediately
+                if self.capabilities.supports_native_ttl:
+                    # Backend has native TTL support (Redis)
+                    self._immediate_set(key, value, tags, ttl=ttl_seconds)
+                else:
+                    # Backend doesn't have native TTL - use buffering but mark for TTL tracking
+                    # For now, force immediate write for TTL consistency
+                    self._immediate_set(key, value, tags, ttl=ttl_seconds)
+
+            duration_ms = (time.time() - start_time) * 1000
+            self.metrics.record_operation('set_with_ttl', duration_ms, len(value))
+
+        except Exception as e:
+            self.logger.error(f"Failed to set key {key} with TTL: {e}")
+            raise
             
     def get(self, key: str) -> bytes:
         """Get value for a key.
@@ -1155,10 +1201,7 @@ class KeyValueStore:
             Dictionary with 'value' and 'metadata' keys
         """
         value = self.get(key)  # This will raise KeyError if the key doesn't exist
-        if self.is_redis_backend:
-            metadata = self.storage.get_metadata(key, self.db, self.namespace)
-        else:
-            metadata = self.metadata.get_metadata(key, self.db, self.namespace)
+        metadata = self._get_metadata(key)
         return {"value": value, "metadata": metadata}
 
     def delete(self, key: str) -> None:
@@ -1181,33 +1224,28 @@ class KeyValueStore:
         try:
             with self._get_lock(key):
                 # Remove from buffer if it exists
-                if key in self.buffer:
-                    size = len(self.buffer[key])
-                    del self.buffer[key]
-                    self.current_buffer_size -= size
-                    
+                with self.buffer_lock:
+                    if key in self.buffer:
+                        size = len(self.buffer[key])
+                        del self.buffer[key]
+                        self.current_buffer_size -= size
+
                 # Get metadata
-                if self.is_redis_backend:
-                    metadata = self.storage.get_metadata(key, self.db, self.namespace)
-                else:
-                    metadata = self.metadata.get_metadata(key, self.db, self.namespace)
-                    
+                metadata = self._get_metadata(key)
+
                 if not metadata:
                     return  # Key doesn't exist, nothing to do
-                    
+
                 # Remove from indexes
                 if self.index_manager:
                     self.index_manager.remove_key_from_indexes(key)
-                    
+
                 # Delete the file if it exists using storage backend
                 path = metadata["path"]
                 self.storage.delete_file(path)
-                    
+
                 # Delete metadata
-                if self.is_redis_backend:
-                    self.storage.delete_metadata(key, self.db, self.namespace)
-                else:
-                    self.metadata.delete_metadata(key, self.db, self.namespace)
+                self._delete_metadata(key)
             
             if self.perf_logger:
                 self.perf_logger.end_operation(op_id, success=True)

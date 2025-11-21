@@ -11,25 +11,41 @@ import errno
 import stat
 from typing import Optional
 
-from storage_backends.base import StorageBackend, COMPRESS_MIN_SIZE, COMPRESS_LEVEL
+from storage_backends.base import StorageBackend, BackendCapabilities, COMPRESS_MIN_SIZE, COMPRESS_LEVEL
 
 
 class FileSystemStorage(StorageBackend):
     """A storage backend that uses the local filesystem to store data."""
-    
+
     def __init__(self, base_path):
         """
         Initialize the filesystem storage backend.
-        
+
         Args:
             base_path: Base directory for storing files
         """
         self.base_path = base_path
         os.makedirs(base_path, exist_ok=True)
         self.logger = logging.getLogger("nadb.fs_storage")
-        
+
         # Verify base directory permissions
         self._check_directory_permissions(base_path)
+
+    def get_capabilities(self) -> BackendCapabilities:
+        """Get the capabilities of the filesystem storage backend."""
+        return BackendCapabilities(
+            supports_buffering=True,  # Benefits from buffering
+            supports_native_ttl=False,  # No native TTL support
+            supports_transactions=False,  # No native transactions
+            supports_metadata=False,  # Uses external SQLite for metadata
+            supports_atomic_writes=True,  # Atomic rename operation
+            write_strategy="buffered",  # Prefers buffered writes
+            is_distributed=False,  # Local filesystem
+            is_persistent=True,  # Data persists
+            supports_compression=True,  # Benefits from compression
+            supports_native_queries=False,  # No query support
+            max_value_size_bytes=None  # No hard limit (filesystem dependent)
+        )
     
     def _check_directory_permissions(self, directory):
         """

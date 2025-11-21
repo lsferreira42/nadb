@@ -5,12 +5,64 @@ This module defines the interface that all storage backends must implement,
 ensuring consistency across different storage implementations.
 """
 from abc import ABC, abstractmethod
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Literal
+from dataclasses import dataclass
 import zlib
 
 # Constants for compression
 COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
 COMPRESS_LEVEL = 6  # Medium compression (range is 0-9)
+
+
+@dataclass
+class BackendCapabilities:
+    """
+    Describes the capabilities and characteristics of a storage backend.
+
+    This allows KeyValueStore to adapt its behavior based on what
+    the backend supports natively.
+    """
+    # Core capabilities
+    supports_buffering: bool = True
+    """Backend can benefit from in-memory buffering before writes"""
+
+    supports_native_ttl: bool = False
+    """Backend has native TTL/expiration support"""
+
+    supports_transactions: bool = False
+    """Backend has native transaction support (ACID)"""
+
+    supports_metadata: bool = False
+    """Backend can store metadata alongside data (tags, timestamps, etc)"""
+
+    supports_atomic_writes: bool = True
+    """Backend guarantees atomic write operations"""
+
+    # Write strategy
+    write_strategy: Literal["immediate", "buffered", "auto"] = "auto"
+    """
+    Preferred write strategy:
+    - immediate: Write directly to storage (Redis, databases)
+    - buffered: Use in-memory buffer with periodic flush (filesystem)
+    - auto: Let KeyValueStore decide based on other capabilities
+    """
+
+    # Performance characteristics
+    is_distributed: bool = False
+    """Backend is distributed/networked (affects latency expectations)"""
+
+    is_persistent: bool = True
+    """Backend persists data across restarts"""
+
+    supports_compression: bool = True
+    """Backend supports or benefits from compression"""
+
+    # Query capabilities
+    supports_native_queries: bool = False
+    """Backend can handle complex queries natively"""
+
+    max_value_size_bytes: Optional[int] = None
+    """Maximum value size supported (None = unlimited)"""
 
 
 class StorageBackend(ABC):
@@ -20,6 +72,16 @@ class StorageBackend(ABC):
     All storage backends must implement these methods to ensure
     consistent behavior across different storage implementations.
     """
+
+    @abstractmethod
+    def get_capabilities(self) -> BackendCapabilities:
+        """
+        Get the capabilities of this storage backend.
+
+        Returns:
+            BackendCapabilities describing what this backend supports
+        """
+        pass
 
     @abstractmethod
     def write_data(self, relative_path: str, data: bytes) -> bool:
@@ -157,19 +219,10 @@ class StorageBackend(ABC):
         """
         pass
 
-
-class MetadataStorageBackend(StorageBackend):
-    """
-    Extended abstract base class for backends that also handle metadata.
-
-    Some backends (like Redis) can store both data and metadata,
-    while others (like FileSystem) use separate metadata storage.
-    """
-
-    @abstractmethod
+    # Optional metadata methods - only needed if supports_metadata=True
     def set_metadata(self, metadata: Dict[str, Any]) -> bool:
         """
-        Store metadata.
+        Store metadata (optional - only if backend supports_metadata).
 
         Args:
             metadata: Dictionary containing metadata
@@ -177,12 +230,11 @@ class MetadataStorageBackend(StorageBackend):
         Returns:
             True if successful, False otherwise
         """
-        pass
+        raise NotImplementedError("Backend does not support metadata storage")
 
-    @abstractmethod
     def get_metadata(self, key: str, db: str, namespace: str) -> Optional[Dict[str, Any]]:
         """
-        Get metadata for a key.
+        Get metadata for a key (optional - only if backend supports_metadata).
 
         Args:
             key: The data key
@@ -192,12 +244,11 @@ class MetadataStorageBackend(StorageBackend):
         Returns:
             Metadata dictionary or None if not found
         """
-        pass
+        raise NotImplementedError("Backend does not support metadata storage")
 
-    @abstractmethod
     def delete_metadata(self, key: str, db: str, namespace: str) -> bool:
         """
-        Delete metadata for a key.
+        Delete metadata for a key (optional - only if backend supports_metadata).
 
         Args:
             key: The data key
@@ -207,12 +258,11 @@ class MetadataStorageBackend(StorageBackend):
         Returns:
             True if successful, False otherwise
         """
-        pass
+        raise NotImplementedError("Backend does not support metadata storage")
 
-    @abstractmethod
     def query_metadata(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Query metadata based on criteria.
+        Query metadata based on criteria (optional - only if backend supports_metadata).
 
         Args:
             query: Dictionary containing query parameters
@@ -220,4 +270,4 @@ class MetadataStorageBackend(StorageBackend):
         Returns:
             List of matching metadata dictionaries
         """
-        pass
+        raise NotImplementedError("Backend does not support metadata queries")

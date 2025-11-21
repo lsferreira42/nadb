@@ -17,6 +17,16 @@ This version includes important security and stability improvements:
 - **Abstract Storage Interface** - Consistent backend APIs
 - **Complete Transaction Rollback** - Restores tags and TTL
 
+## Architecture Improvements (v2.2.0)
+
+Version 2.2.0 introduces a capabilities-based architecture:
+
+- **Backend Capabilities System** - Self-describing backends
+- **Unified Write Strategies** - Consistent behavior across backends
+- **Automatic Adaptation** - KeyValueStore adapts to backend features
+- **Clean Codebase** - No more backend-specific conditionals
+- **Easy Extensibility** - Simple to add new storage backends
+
 
 **Source Repository:** [https://github.com/lsferreira42/nadb](https://github.com/lsferreira42/nadb)
 

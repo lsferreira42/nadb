@@ -15,7 +15,7 @@ import redis
 from redis.connection import ConnectionPool
 
 import zlib
-from storage_backends.base import MetadataStorageBackend, COMPRESS_MIN_SIZE, COMPRESS_LEVEL
+from storage_backends.base import StorageBackend, BackendCapabilities, COMPRESS_MIN_SIZE, COMPRESS_LEVEL
 
 # Redis connection parameters
 DEFAULT_CONNECTION_TIMEOUT = 5.0  # Default connection timeout in seconds
@@ -27,7 +27,7 @@ INITIAL_RETRY_DELAY = 0.5  # Initial retry delay in seconds
 DEFAULT_POOL_SIZE = 10  # Default maximum connections in pool
 DEFAULT_POOL_TIMEOUT = 20  # Default timeout for getting connection from pool
 
-class RedisStorage(MetadataStorageBackend):
+class RedisStorage(StorageBackend):
     """Redis storage backend for NADB key-value store with metadata support."""
 
     # Default batch size for SCAN operations
@@ -88,7 +88,23 @@ class RedisStorage(MetadataStorageBackend):
         self.ttl_set = "nadb:ttl"
         
         self.logger.info(f"Redis storage initialized with pool: {host}:{port} DB:{db} (max_connections={max_connections})")
-    
+
+    def get_capabilities(self) -> BackendCapabilities:
+        """Get the capabilities of the Redis storage backend."""
+        return BackendCapabilities(
+            supports_buffering=False,  # Redis is fast, no need for buffering
+            supports_native_ttl=True,  # Redis has native EXPIRE command
+            supports_transactions=True,  # Redis has MULTI/EXEC
+            supports_metadata=True,  # Redis stores metadata in hashes
+            supports_atomic_writes=True,  # Redis operations are atomic
+            write_strategy="immediate",  # Write directly to Redis
+            is_distributed=True,  # Redis is networked
+            is_persistent=True,  # Redis can persist (RDB/AOF)
+            supports_compression=True,  # Can compress before storing
+            supports_native_queries=False,  # Limited query support (scans)
+            max_value_size_bytes=512 * 1024 * 1024  # 512MB default Redis limit
+        )
+
     def _connect(self):
         """
         Connect to Redis server with connection pooling and exponential backoff for retries.

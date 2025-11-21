@@ -36,6 +36,13 @@ A high-performance, enterprise-grade key-value store with advanced features incl
 - **Redis SCAN** - Uses SCAN instead of KEYS for production-safe key iteration
 - **Abstract Storage Interface** - Consistent API across all storage backends
 
+### Architecture Improvements (v2.2.0)
+- **Backend Capabilities System** - Backends declare their capabilities (TTL, transactions, metadata)
+- **Unified Write Strategies** - Consistent behavior across all backends
+- **Automatic Strategy Selection** - KeyValueStore adapts based on backend capabilities
+- **Simplified Codebase** - Removed backend-specific conditionals throughout
+- **Extensibility** - Easy to add new backends with custom capabilities
+
 ## Installation
 
 ```bash
@@ -291,6 +298,62 @@ Uses SCAN instead of KEYS command to avoid blocking Redis in production:
 # Internally uses SCAN with cursor for large datasets
 results = kv_store.query_by_tags(["tag1", "tag2"])
 ```
+
+## Architecture (v2.2.0)
+
+### Backend Capabilities System
+
+NADB v2.2.0 introduces a powerful capabilities-based architecture that makes backends self-describing and allows KeyValueStore to adapt automatically:
+
+```python
+from storage_backends import BackendCapabilities
+
+# Each backend declares its capabilities
+class FileSystemStorage(StorageBackend):
+    def get_capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            supports_buffering=True,      # Benefits from in-memory buffering
+            supports_native_ttl=False,     # No native TTL support
+            supports_metadata=False,       # Uses external SQLite
+            write_strategy="buffered",     # Prefers batched writes
+            is_distributed=False,          # Local storage
+            supports_native_queries=False  # Limited query support
+        )
+
+class RedisStorage(StorageBackend):
+    def get_capabilities(self) -> BackendCapabilities:
+        return BackendCapabilities(
+            supports_buffering=False,      # Redis is fast, no buffering needed
+            supports_native_ttl=True,      # Native EXPIRE command
+            supports_metadata=True,        # Stores metadata in hashes
+            write_strategy="immediate",    # Write directly
+            is_distributed=True,           # Networked storage
+            supports_native_queries=False  # Limited (SCAN-based)
+        )
+```
+
+### Automatic Behavior Adaptation
+
+KeyValueStore automatically adapts based on backend capabilities:
+
+```python
+# Filesystem backend - uses buffering
+kv_fs = KeyValueStore(storage_backend="fs", ...)
+# kv_fs.use_buffering == True
+# kv_fs.set() writes to buffer, flushes periodically
+
+# Redis backend - immediate writes
+kv_redis = KeyValueStore(storage_backend="redis", ...)
+# kv_redis.use_buffering == False
+# kv_redis.set() writes directly to Redis
+```
+
+### Benefits
+
+- **Consistent API**: Same code works with all backends
+- **Optimal Performance**: Each backend uses best strategy
+- **Easy Extension**: Add new backends by implementing capabilities
+- **No Conditionals**: Clean code without `if backend == "redis"` checks
 
 ## License
 

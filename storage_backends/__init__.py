@@ -10,11 +10,11 @@ Currently supported backends:
 from importlib import import_module
 import logging
 
-from storage_backends.base import StorageBackend, MetadataStorageBackend
+from storage_backends.base import StorageBackend, BackendCapabilities
 
 logger = logging.getLogger('storage_backends')
 
-__all__ = ['StorageBackend', 'MetadataStorageBackend', 'StorageFactory']
+__all__ = ['StorageBackend', 'BackendCapabilities', 'StorageFactory']
 
 class StorageFactory:
     """Factory for creating storage backends."""
