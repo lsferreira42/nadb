@@ -1,6 +1,6 @@
 # NADB - Not A Database
 
-A high-performance, enterprise-grade key-value store with advanced features including transactions, backup & recovery, intelligent indexing, and structured logging.
+A high-performance, enterprise-grade key-value store with advanced features including transactions, backup & recovery, intelligent indexing, network replication, and structured logging.
 
 [![Tests](https://github.com/lsferreira42/nadb/actions/workflows/tests.yml/badge.svg)](https://github.com/lsferreira42/nadb/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/lsferreira42/nadb/branch/main/graph/badge.svg)](https://codecov.io/gh/lsferreira42/nadb)
@@ -23,6 +23,7 @@ A high-performance, enterprise-grade key-value store with advanced features incl
 - **ACID Transactions** with automatic rollback (including tags and TTL restoration)
 - **Backup & Recovery** with incremental backups
 - **Intelligent Indexing & Caching** with TTL support for cache entries
+- **Network Replication** with primary-secondary architecture for high availability
 - **Structured Logging** with performance metrics
 - **Connection Pooling** for Redis backend
 - **Complex Queries** with pagination support
@@ -42,6 +43,15 @@ A high-performance, enterprise-grade key-value store with advanced features incl
 - **Automatic Strategy Selection** - KeyValueStore adapts based on backend capabilities
 - **Simplified Codebase** - Removed backend-specific conditionals throughout
 - **Extensibility** - Easy to add new backends with custom capabilities
+
+### Network Replication (v2.3.0)
+- **Primary-Secondary Architecture** - One writable primary, multiple read-only secondaries
+- **Automatic Operation Broadcasting** - Changes are automatically replicated to all secondaries
+- **Catch-up Mechanism** - New or reconnected replicas receive missed operations
+- **Heartbeat Monitoring** - Track replica health and connection status
+- **Read Scaling** - Distribute read load across multiple replica nodes
+- **Geographic Distribution** - Place replicas closer to users for lower latency
+- **High Availability** - Maintain data availability even if nodes fail
 
 ## Installation
 
@@ -185,6 +195,73 @@ result = kv_store.complex_query(conditions)
 stats = kv_store.get_stats()
 print(f"Cache hit rate: {stats['cache_stats']['query_cache']['hit_rate']:.2%}")
 ```
+
+### 🌐 Network Replication
+Distribute data across multiple nodes for high availability:
+
+```python
+from storage_backends.network_sync import NetworkSyncBackend
+from storage_backends.fs import FileSystemStorage
+
+# PRIMARY NODE - Accepts writes and broadcasts to replicas
+base_backend = FileSystemStorage(base_path="./data_primary")
+
+replication_config = {
+    'mode': 'primary',
+    'listen_host': '0.0.0.0',
+    'listen_port': 9000,
+    'heartbeat_interval': 5,
+    'max_operation_log': 10000
+}
+
+primary_backend = NetworkSyncBackend(
+    base_backend=base_backend,
+    mode='primary',
+    config=replication_config
+)
+primary_backend.set_context(db="mydb", namespace="production")
+
+# Write data (automatically replicated)
+primary_backend.write_with_replication(
+    relative_path="path/to/data",
+    data=b"Important data",
+    key="user:123",
+    tags=["user", "active"],
+    ttl=3600
+)
+
+# SECONDARY NODE - Read-only replica
+secondary_base = FileSystemStorage(base_path="./data_secondary")
+
+secondary_config = {
+    'mode': 'secondary',
+    'primary_host': 'primary.example.com',
+    'primary_port': 9000
+}
+
+secondary_backend = NetworkSyncBackend(
+    base_backend=secondary_base,
+    mode='secondary',
+    config=secondary_config
+)
+
+# Reads work on secondaries
+data = secondary_backend.read_data("path/to/data")
+
+# Monitor replication
+stats = primary_backend.get_replication_stats()
+print(f"Connected replicas: {stats['replica_count']}")
+print(f"Operations replicated: {stats['sequence_number']}")
+```
+
+**Key Features:**
+- **Automatic Operation Broadcasting**: All writes are automatically replicated
+- **Read Scaling**: Distribute read load across multiple secondaries
+- **Automatic Reconnection**: Secondaries reconnect automatically on failures
+- **Catch-up Mechanism**: New replicas receive missed operations
+- **Monitoring**: Track replica status, lag, and operation counts
+
+See [examples/replication/](examples/replication/) for complete working examples.
 
 ### 📊 Structured Logging
 Comprehensive observability with JSON logs:

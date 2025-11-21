@@ -5,6 +5,7 @@ This package contains storage backend implementations for the NADB key-value sto
 Currently supported backends:
 - fs: File system storage
 - redis: Redis storage
+- network_sync: Network-replicated storage (wraps fs or redis)
 """
 
 from importlib import import_module
@@ -39,7 +40,8 @@ class StorageFactory:
             backend_classes = {
                 "fs": "FileSystemStorage",
                 "redis": "RedisStorage",
-                "memcache": "MemcacheStorage"
+                "memcache": "MemcacheStorage",
+                "network_sync": "NetworkSyncBackend"
             }
             
             # Get the class name from the mapping or use default naming convention
