@@ -5,17 +5,16 @@ This module implements a file-based storage backend that saves data to the local
 """
 import os
 import logging
-import zlib
 import uuid
 import tempfile
 import errno
 import stat
+from typing import Optional
 
-# Constants for compression
-COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
-COMPRESS_LEVEL = 6  # Medium compression (range is 0-9)
+from storage_backends.base import StorageBackend, COMPRESS_MIN_SIZE, COMPRESS_LEVEL
 
-class FileSystemStorage:
+
+class FileSystemStorage(StorageBackend):
     """A storage backend that uses the local filesystem to store data."""
     
     def __init__(self, base_path):
@@ -84,15 +83,30 @@ class FileSystemStorage:
     
     def get_full_path(self, relative_path):
         """
-        Convert a relative path to a full path.
-        
+        Convert a relative path to a full path with path traversal protection.
+
         Args:
             relative_path: Path relative to the base directory
-            
+
         Returns:
             Full path in the filesystem
+
+        Raises:
+            ValueError: If path traversal attempt is detected
         """
-        full_path = os.path.join(self.base_path, relative_path)
+        # Normalize the base path
+        normalized_base = os.path.normpath(os.path.abspath(self.base_path))
+
+        # Join and normalize the full path
+        full_path = os.path.normpath(os.path.abspath(
+            os.path.join(self.base_path, relative_path)
+        ))
+
+        # Security check: ensure the path is within base_path
+        if not full_path.startswith(normalized_base + os.sep) and full_path != normalized_base:
+            self.logger.error(f"Path traversal attempt detected: {relative_path}")
+            raise ValueError(f"Path traversal attempt detected: path must be within base directory")
+
         return full_path
     
     def ensure_directory_exists(self, path):

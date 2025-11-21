@@ -31,6 +31,8 @@ class Operation:
     ttl: Optional[int] = None
     original_value: Optional[bytes] = None  # For rollback
     original_existed: bool = False  # For rollback
+    original_tags: Optional[List[str]] = None  # For rollback - restore original tags
+    original_ttl: Optional[int] = None  # For rollback - restore original TTL
 
 
 @dataclass
@@ -177,19 +179,47 @@ class TransactionManager:
             raise ValueError(f"Unknown operation type: {operation.op_type}")
     
     def _reverse_operation(self, operation: Operation):
-        """Reverse a single operation for rollback."""
+        """Reverse a single operation for rollback, including tags and TTL."""
         try:
             if operation.op_type in ['set', 'set_with_ttl']:
                 if operation.original_existed:
-                    # Restore original value
-                    self.kv_store.set(operation.key, operation.original_value)
+                    # Restore original value with original tags and TTL
+                    if operation.original_ttl and operation.original_ttl > 0:
+                        self.kv_store.set_with_ttl(
+                            operation.key,
+                            operation.original_value,
+                            operation.original_ttl,
+                            operation.original_tags
+                        )
+                    else:
+                        self.kv_store.set(
+                            operation.key,
+                            operation.original_value,
+                            operation.original_tags
+                        )
                 else:
                     # Delete the key that was created
-                    self.kv_store.delete(operation.key)
+                    try:
+                        self.kv_store.delete(operation.key)
+                    except KeyError:
+                        pass  # Key might already be deleted
+
             elif operation.op_type == 'delete':
                 if operation.original_existed:
-                    # Restore the deleted key
-                    self.kv_store.set(operation.key, operation.original_value)
+                    # Restore the deleted key with original tags and TTL
+                    if operation.original_ttl and operation.original_ttl > 0:
+                        self.kv_store.set_with_ttl(
+                            operation.key,
+                            operation.original_value,
+                            operation.original_ttl,
+                            operation.original_tags
+                        )
+                    else:
+                        self.kv_store.set(
+                            operation.key,
+                            operation.original_value,
+                            operation.original_tags
+                        )
         except Exception as e:
             self.logger.error(f"Failed to reverse operation {operation.op_type} for key {operation.key}: {e}")
             # Continue with other operations
@@ -265,11 +295,18 @@ class TransactionContext:
         return len(self.transaction.operations)
     
     def _store_original_value(self, operation: Operation):
-        """Store original value for rollback purposes."""
+        """Store original value, tags, and TTL for rollback purposes."""
         try:
-            # Check if key exists and store original value
-            original_value = self.kv_store.get(operation.key)
-            operation.original_value = original_value
+            # Check if key exists and store original value with metadata
+            result = self.kv_store.get_with_metadata(operation.key)
+            operation.original_value = result['value']
             operation.original_existed = True
+
+            # Store original tags and TTL from metadata
+            metadata = result.get('metadata', {})
+            operation.original_tags = metadata.get('tags', [])
+            operation.original_ttl = metadata.get('ttl')
         except KeyError:
             operation.original_existed = False
+            operation.original_tags = None
+            operation.original_ttl = None

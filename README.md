@@ -19,13 +19,22 @@ A high-performance, enterprise-grade key-value store with advanced features incl
 - **Data compression** for efficient storage
 - **Pluggable storage backends** (Filesystem, Redis)
 
-### 🆕 Advanced Features (Enterprise-Grade)
-- **🔄 ACID Transactions** with automatic rollback
-- **💾 Backup & Recovery** with incremental backups
-- **⚡ Intelligent Indexing & Caching** for fast queries
-- **📊 Structured Logging** with performance metrics
-- **🔗 Connection Pooling** for Redis backend
-- **🔍 Complex Queries** with pagination support
+### Advanced Features (Enterprise-Grade)
+- **ACID Transactions** with automatic rollback (including tags and TTL restoration)
+- **Backup & Recovery** with incremental backups
+- **Intelligent Indexing & Caching** with TTL support for cache entries
+- **Structured Logging** with performance metrics
+- **Connection Pooling** for Redis backend
+- **Complex Queries** with pagination support
+
+### Security & Stability (v2.1.0)
+- **Path Traversal Protection** - Prevents directory escape attacks in filesystem backend
+- **SQL Injection Prevention** - Sanitized LIKE patterns in metadata queries
+- **Input Validation** - Comprehensive validation on all public API methods
+- **Race Condition Fixes** - Atomic buffer operations with proper locking
+- **Memory Leak Prevention** - Automatic cleanup of unused key locks
+- **Redis SCAN** - Uses SCAN instead of KEYS for production-safe key iteration
+- **Abstract Storage Interface** - Consistent API across all storage backends
 
 ## Installation
 
@@ -243,6 +252,44 @@ print(f"Total keys: {stats['count']}")
 print(f"Cache hit rate: {stats['cache_stats']['query_cache']['hit_rate']:.2%}")
 print(f"Active transactions: {stats['active_transactions']}")
 print(f"Average query time: {stats['query_stats']['tags_and']['avg_time_ms']:.2f}ms")
+```
+
+## Security
+
+NADB v2.1.0 includes several security enhancements:
+
+### Input Validation
+All public API methods validate inputs:
+```python
+# These will raise ValueError
+kv_store.set("", b"data")  # Empty key
+kv_store.set(None, b"data")  # None key
+kv_store.get("")  # Empty key
+
+# These will raise TypeError
+kv_store.set("key", "not bytes")  # Value must be bytes
+kv_store.set("key", b"data", tags="not-a-list")  # Tags must be list
+```
+
+### Path Traversal Protection
+The filesystem backend prevents directory escape attacks:
+```python
+# This will raise ValueError - path traversal attempt
+storage.get_full_path("../../../etc/passwd")
+```
+
+### SQL Injection Prevention
+LIKE patterns are automatically sanitized:
+```python
+# Safe - special characters are escaped
+results = metadata.query_metadata({"key": "test%_pattern"})
+```
+
+### Production-Safe Redis Operations
+Uses SCAN instead of KEYS command to avoid blocking Redis in production:
+```python
+# Internally uses SCAN with cursor for large datasets
+results = kv_store.query_by_tags(["tag1", "tag2"])
 ```
 
 ## License

@@ -4,12 +4,17 @@ Storage Backends Package for NADB Key-Value Store.
 This package contains storage backend implementations for the NADB key-value store.
 Currently supported backends:
 - fs: File system storage
+- redis: Redis storage
 """
 
 from importlib import import_module
 import logging
 
+from storage_backends.base import StorageBackend, MetadataStorageBackend
+
 logger = logging.getLogger('storage_backends')
+
+__all__ = ['StorageBackend', 'MetadataStorageBackend', 'StorageFactory']
 
 class StorageFactory:
     """Factory for creating storage backends."""

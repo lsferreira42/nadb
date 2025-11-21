@@ -1,8 +1,21 @@
 # Tutorial: nadb
 
-NADB is a simple **key-value store** library for Python. Think of it like a dictionary where you can save data using a *key* (a label) and retrieve it later.
+NADB is an enterprise-grade **key-value store** library for Python. Think of it like a dictionary where you can save data using a *key* (a label) and retrieve it later.
 It automatically saves your data to disk (*persistence*) or can use faster backends like Redis.
 It supports features like adding **tags** to categorize data, setting an expiration time (**TTL**), and handling binary data efficiently.
+
+## Security & Stability (v2.1.0)
+
+This version includes important security and stability improvements:
+
+- **Path Traversal Protection** - Filesystem backend validates all paths
+- **SQL Injection Prevention** - LIKE patterns are sanitized
+- **Input Validation** - All public APIs validate inputs
+- **Race Condition Fixes** - Atomic buffer operations
+- **Memory Leak Prevention** - Automatic lock cleanup
+- **Redis SCAN** - Production-safe key iteration
+- **Abstract Storage Interface** - Consistent backend APIs
+- **Complete Transaction Rollback** - Restores tags and TTL
 
 
 **Source Repository:** [https://github.com/lsferreira42/nadb](https://github.com/lsferreira42/nadb)

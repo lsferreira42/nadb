@@ -60,47 +60,94 @@ class IndexStats:
 
 
 class LRUCache:
-    """Thread-safe LRU cache implementation."""
-    
-    def __init__(self, max_size: int = 1000):
+    """Thread-safe LRU cache implementation with optional TTL support."""
+
+    def __init__(self, max_size: int = 1000, default_ttl_seconds: Optional[int] = None):
+        """
+        Initialize the LRU cache.
+
+        Args:
+            max_size: Maximum number of items in cache
+            default_ttl_seconds: Default TTL for entries (None = no expiration)
+        """
         self.max_size = max_size
-        self.cache = OrderedDict()
+        self.default_ttl = default_ttl_seconds
+        self.cache = OrderedDict()  # key -> (value, expiry_time)
         self.lock = threading.RLock()
         self.hits = 0
         self.misses = 0
-    
+        self.expirations = 0
+
     def get(self, key: str) -> Optional[Any]:
-        """Get value from cache."""
+        """Get value from cache, respecting TTL."""
         with self.lock:
             if key in self.cache:
+                value, expiry_time = self.cache[key]
+
+                # Check if entry has expired
+                if expiry_time is not None and time.time() > expiry_time:
+                    # Entry has expired, remove it
+                    del self.cache[key]
+                    self.misses += 1
+                    self.expirations += 1
+                    return None
+
                 # Move to end (most recently used)
-                value = self.cache.pop(key)
-                self.cache[key] = value
+                self.cache.pop(key)
+                self.cache[key] = (value, expiry_time)
                 self.hits += 1
                 return value
             else:
                 self.misses += 1
                 return None
-    
-    def put(self, key: str, value: Any):
-        """Put value in cache."""
+
+    def put(self, key: str, value: Any, ttl_seconds: Optional[int] = None):
+        """
+        Put value in cache with optional TTL.
+
+        Args:
+            key: Cache key
+            value: Value to cache
+            ttl_seconds: TTL in seconds (None = use default, 0 = no expiration)
+        """
         with self.lock:
+            # Determine expiry time
+            ttl = ttl_seconds if ttl_seconds is not None else self.default_ttl
+            expiry_time = time.time() + ttl if ttl and ttl > 0 else None
+
             if key in self.cache:
                 # Update existing
                 self.cache.pop(key)
             elif len(self.cache) >= self.max_size:
                 # Remove least recently used
                 self.cache.popitem(last=False)
-            
-            self.cache[key] = value
-    
+
+            self.cache[key] = (value, expiry_time)
+
     def clear(self):
         """Clear the cache."""
         with self.lock:
             self.cache.clear()
             self.hits = 0
             self.misses = 0
-    
+            self.expirations = 0
+
+    def cleanup_expired(self) -> int:
+        """Remove all expired entries. Returns count of removed entries."""
+        with self.lock:
+            current_time = time.time()
+            keys_to_remove = []
+
+            for key, (value, expiry_time) in self.cache.items():
+                if expiry_time is not None and current_time > expiry_time:
+                    keys_to_remove.append(key)
+
+            for key in keys_to_remove:
+                del self.cache[key]
+                self.expirations += 1
+
+            return len(keys_to_remove)
+
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         with self.lock:
@@ -111,7 +158,9 @@ class LRUCache:
                 'max_size': self.max_size,
                 'hits': self.hits,
                 'misses': self.misses,
-                'hit_rate': hit_rate
+                'expirations': self.expirations,
+                'hit_rate': hit_rate,
+                'default_ttl': self.default_ttl
             }
 
 

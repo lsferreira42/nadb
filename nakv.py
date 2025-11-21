@@ -7,11 +7,12 @@ import time
 import zlib
 import io
 import statistics
+import weakref
 from hashlib import blake2b
 from collections import defaultdict
 from datetime import datetime, timedelta
 import logging
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Dict, Any, Optional, Tuple, Union, Set
 
 from storage_backends import StorageFactory
 
@@ -328,9 +329,18 @@ class KeyValueMetadata:
             logging.error(f"SQLite error in delete_metadata: {e}")
             raise
 
+    @staticmethod
+    def _escape_like_pattern(pattern: str) -> str:
+        """Escape special characters in SQL LIKE patterns to prevent injection."""
+        # Escape special LIKE characters: % _ and the escape character \
+        escaped = pattern.replace('\\', '\\\\')  # Escape backslash first
+        escaped = escaped.replace('%', '\\%')
+        escaped = escaped.replace('_', '\\_')
+        return escaped
+
     def query_metadata(self, query: dict) -> list:
         """Queries the metadata based on provided criteria.
-        
+
         Args:
             query: Dictionary containing query parameters:
                 - key: Key name pattern (supports SQL LIKE)
@@ -341,17 +351,19 @@ class KeyValueMetadata:
                 - created_before/created_after: Creation time constraints
                 - updated_before/updated_after: Update time constraints
                 - accessed_before/accessed_after: Access time constraints
-                
+
         Returns:
             List of metadata dictionaries matching the criteria
         """
         conditions = []
         params = []
-        
+
         # Basic metadata filters
         if 'key' in query:
-            conditions.append("m.key LIKE ?")
-            params.append(f"%{query['key']}%")
+            # Sanitize the key pattern to prevent SQL injection via LIKE
+            safe_key = self._escape_like_pattern(query['key'])
+            conditions.append("m.key LIKE ? ESCAPE '\\'")
+            params.append(f"%{safe_key}%")
             
         if 'db' in query:
             conditions.append("m.db = ?")
@@ -676,18 +688,29 @@ class PerformanceMetrics:
 
 
 class KeyValueStore:
-    """A key-value store that persists data to disk with advanced features"""
-    def __init__(self, data_folder_path: str, db: str, buffer_size_mb: float,
-                 namespace: str, sync: KeyValueSync, compression_enabled: bool = True, 
-                 storage_backend: str = "fs", enable_transactions: bool = True,
-                 enable_backup: bool = True, enable_indexing: bool = True,
-                 cache_size: int = 10000):
+    """A key-value store that persists data to disk with advanced features."""
+
+    def __init__(
+        self,
+        data_folder_path: str,
+        db: str,
+        buffer_size_mb: float,
+        namespace: str,
+        sync: 'KeyValueSync',
+        compression_enabled: bool = True,
+        storage_backend: str = "fs",
+        enable_transactions: bool = True,
+        enable_backup: bool = True,
+        enable_indexing: bool = True,
+        cache_size: int = 10000
+    ) -> None:
         self.data_folder_path = data_folder_path
         self.buffer_size_mb = buffer_size_mb
         self.db = db
         self.namespace = namespace
         self.buffer = {}  # In-memory buffer
         self.current_buffer_size = 0
+        self.buffer_lock = threading.RLock()  # Lock for buffer operations
         self.locks = {}
         self.locks_management_lock = threading.RLock()
         
@@ -795,29 +818,36 @@ class KeyValueStore:
         return data and data.startswith(b'CMP:')
         
     def _flush_to_disk(self):
-        """Write buffered data to disk."""
-        if not self.buffer:
-            return
-            
-        # Create a copy to allow new writes during flush
-        buffer_copy = dict(self.buffer)
-        self.buffer.clear()
-        self.current_buffer_size = 0
-        
-        for key, value in buffer_copy.items():
+        """Write buffered data to disk with atomic buffer swap to prevent race conditions."""
+        # Atomic swap: acquire lock, swap buffer, release lock
+        with self.buffer_lock:
+            if not self.buffer:
+                return
+
+            # Atomic swap - new buffer for new writes, old buffer for flushing
+            buffer_to_flush = self.buffer
+            self.buffer = {}
+            size_to_flush = self.current_buffer_size
+            self.current_buffer_size = 0
+
+        # Now flush the old buffer without holding the lock
+        # This allows new writes to proceed concurrently
+        failed_items = {}
+
+        for key, value in buffer_to_flush.items():
             start_time = time.time()
             try:
                 # Get file path
                 path = self._get_path(key)
-                
+
                 # Get lock for this key
                 with self._get_lock(key):
                     # Compress data if needed
                     data_to_write = self._compress_data(value)
-                    
+
                     # Write data to file using storage backend
                     success = self.storage.write_data(path, data_to_write)
-                    
+
                     if success:
                         # Update metadata
                         metadata = {
@@ -828,7 +858,7 @@ class KeyValueStore:
                             "size": len(data_to_write),
                             "ttl": None  # Default no TTL
                         }
-                        
+
                         if self.is_redis_backend:
                             # Use Redis's metadata methods
                             self.storage.set_metadata(metadata)
@@ -836,18 +866,25 @@ class KeyValueStore:
                             # Use SQLite metadata
                             self.metadata.set_metadata(metadata)
                     else:
-                        # Add it back to buffer if write failed
-                        self.buffer[key] = value
-                        self.current_buffer_size += len(value)
-                    
+                        # Track failed writes for re-adding
+                        failed_items[key] = value
+
                 duration_ms = (time.time() - start_time) * 1000
                 self.metrics.record_operation('flush', duration_ms, len(value))
-                    
+
             except Exception as e:
                 logging.error(f"Error flushing key {key} to disk: {str(e)}")
-                # Add it back to buffer
-                self.buffer[key] = value
-                self.current_buffer_size += len(value)
+                # Track failed writes for re-adding
+                failed_items[key] = value
+
+        # Re-add failed items to buffer atomically
+        if failed_items:
+            with self.buffer_lock:
+                for key, value in failed_items.items():
+                    # Only add if not already in buffer (might have been updated)
+                    if key not in self.buffer:
+                        self.buffer[key] = value
+                        self.current_buffer_size += len(value)
                 
     def _write_key_to_disk(self, key, value):
         """Write a single key-value pair to disk.
@@ -891,16 +928,28 @@ class KeyValueStore:
             logging.error(f"Error writing key {key} to disk: {e}")
             return False
 
-    def set(self, key: str, value: bytes, tags: list = None):
+    def set(self, key: str, value: bytes, tags: List[str] = None):
         """Set a key-value pair, optionally with tags.
-        
+
         Args:
-            key: The key for the value
+            key: The key for the value (non-empty string)
             value: Binary data to store
             tags: Optional list of tags for search/categorization
+
+        Raises:
+            TypeError: If value is not bytes or tags is not a list of strings
+            ValueError: If key is empty or None
         """
+        # Input validation
+        if not key or not isinstance(key, str):
+            raise ValueError("Key must be a non-empty string")
         if not isinstance(value, bytes):
             raise TypeError("Value must be bytes")
+        if tags is not None:
+            if not isinstance(tags, list):
+                raise TypeError("Tags must be a list")
+            if not all(isinstance(t, str) for t in tags):
+                raise TypeError("All tags must be strings")
         
         op_id = f"set_{key}_{int(time.time() * 1000)}"
         if self.perf_logger:
@@ -940,9 +989,14 @@ class KeyValueStore:
                         raise IOError(f"Failed to write key {key} to Redis backend")
                 else:
                     # Original behavior for non-Redis backends (buffering)
-                    self.buffer[key] = value
-                    self.current_buffer_size += data_len
-                    
+                    # Use buffer_lock to prevent race conditions with flush
+                    with self.buffer_lock:
+                        # Adjust size if key already exists
+                        if key in self.buffer:
+                            self.current_buffer_size -= len(self.buffer[key])
+                        self.buffer[key] = value
+                        self.current_buffer_size += data_len
+
                     # Update metadata (SQLite)
                     metadata = {
                         "path": self._get_path(key),
@@ -955,11 +1009,11 @@ class KeyValueStore:
                     if tags:
                         metadata["tags"] = tags
                     self.metadata.set_metadata(metadata)
-                    
+
                     # Update indexes
                     if self.index_manager:
                         self.index_manager.add_key_to_indexes(key, tags or [], metadata)
-                    
+
                     # Check if we need to flush the buffer for non-Redis
                     self.flush_if_needed()
             
@@ -1029,20 +1083,25 @@ class KeyValueStore:
         duration_ms = (time.time() - start_time) * 1000
         self.metrics.record_operation('set_with_ttl', duration_ms, len(value))
             
-    def get(self, key: str):
+    def get(self, key: str) -> bytes:
         """Get value for a key.
-        
+
         Args:
-            key: The key to retrieve
-            
+            key: The key to retrieve (non-empty string)
+
         Returns:
             The value as bytes
-            
+
         Raises:
             KeyError: If key doesn't exist
+            ValueError: If key is empty or None
         """
+        # Input validation
+        if not key or not isinstance(key, str):
+            raise ValueError("Key must be a non-empty string")
+
         start_time = time.time()
-        
+
         try:
             # First check the in-memory buffer
             with self._get_lock(key):
@@ -1086,24 +1145,35 @@ class KeyValueStore:
             self.metrics.record_operation('get_miss', duration_ms)
             raise
             
-    def get_with_metadata(self, key: str):
-        """Get a value with its associated metadata."""
+    def get_with_metadata(self, key: str) -> Dict[str, Any]:
+        """Get a value with its associated metadata.
+
+        Args:
+            key: The key to retrieve
+
+        Returns:
+            Dictionary with 'value' and 'metadata' keys
+        """
         value = self.get(key)  # This will raise KeyError if the key doesn't exist
         if self.is_redis_backend:
             metadata = self.storage.get_metadata(key, self.db, self.namespace)
         else:
             metadata = self.metadata.get_metadata(key, self.db, self.namespace)
         return {"value": value, "metadata": metadata}
-        
-    def delete(self, key: str):
+
+    def delete(self, key: str) -> None:
         """Delete a key-value pair.
-        
+
         Args:
-            key: The key to delete
-            
+            key: The key to delete (non-empty string)
+
         Raises:
-            KeyError: If key doesn't exist
+            ValueError: If key is empty or None
         """
+        # Input validation
+        if not key or not isinstance(key, str):
+            raise ValueError("Key must be a non-empty string")
+
         op_id = f"delete_{key}_{int(time.time() * 1000)}"
         if self.perf_logger:
             self.perf_logger.start_operation(op_id, "delete", key=key)
@@ -1148,12 +1218,42 @@ class KeyValueStore:
             self.logger.error(f"Failed to delete key {key}: {e}")
             raise
             
-    def _get_lock(self, key: str):
-        """Get a lock for the specified key."""
+    def _get_lock(self, key: str) -> threading.RLock:
+        """Get a lock for the specified key with automatic cleanup of unused locks."""
         with self.locks_management_lock:
             if key not in self.locks:
                 self.locks[key] = threading.RLock()
+
+            # Periodic cleanup: remove locks that aren't currently held
+            # Only cleanup every 1000 lock requests to avoid overhead
+            if not hasattr(self, '_lock_request_count'):
+                self._lock_request_count = 0
+            self._lock_request_count += 1
+
+            if self._lock_request_count >= 1000:
+                self._lock_request_count = 0
+                self._cleanup_unused_locks()
+
             return self.locks[key]
+
+    def _cleanup_unused_locks(self) -> None:
+        """Remove locks that are not currently held by any thread."""
+        # Must be called while holding locks_management_lock
+        keys_to_remove = []
+        for key, lock in self.locks.items():
+            # Try to acquire the lock without blocking
+            # If we can acquire it, no one is using it
+            if lock.acquire(blocking=False):
+                lock.release()
+                # Only remove if key is not in buffer (might be needed soon)
+                if key not in self.buffer:
+                    keys_to_remove.append(key)
+
+        for key in keys_to_remove:
+            del self.locks[key]
+
+        if keys_to_remove:
+            self.logger.debug(f"Cleaned up {len(keys_to_remove)} unused locks")
             
     def flush(self):
         """Flush all buffered data to disk."""
