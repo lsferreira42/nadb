@@ -13,7 +13,6 @@ import unittest
 import time
 import tempfile
 import shutil
-from threading import Thread
 
 from replication.protocol import (
     ReplicationProtocol,
@@ -31,6 +30,10 @@ from replication.exceptions import (
 from storage_backends.fs import FileSystemStorage
 from storage_backends.network_sync import NetworkSyncBackend
 
+
+# ============================================================================
+# Protocol Tests
+# ============================================================================
 
 class TestReplicationProtocol(unittest.TestCase):
     """Test replication protocol serialization."""
@@ -100,11 +103,10 @@ class TestReplicationProtocol(unittest.TestCase):
         # Serialize
         serialized = ReplicationProtocol.serialize(operation)
 
-        # Corrupt the data (but not the checksum)
-        # The checksum should detect this
+        # Corrupt the data (in the middle of JSON, after length prefix)
         corrupted = serialized[:10] + b'X' + serialized[11:]
 
-        # Should raise ChecksumMismatchError
+        # Should raise ChecksumMismatchError or ProtocolError
         with self.assertRaises((ChecksumMismatchError, ProtocolError)):
             ReplicationProtocol.deserialize(corrupted)
 
@@ -129,6 +131,22 @@ class TestReplicationProtocol(unittest.TestCase):
         # Verify
         self.assertEqual(deserialized.data['value'], large_value)
 
+    def test_heartbeat_operation(self):
+        """Test heartbeat operation."""
+        operation = ReplicationProtocol.create_heartbeat_operation(sequence=100)
+
+        # Serialize and deserialize
+        serialized = ReplicationProtocol.serialize(operation)
+        deserialized = ReplicationProtocol.deserialize(serialized)
+
+        self.assertEqual(deserialized.type, OperationType.HEARTBEAT)
+        self.assertEqual(deserialized.sequence, 100)
+        self.assertEqual(deserialized.data, {})
+
+
+# ============================================================================
+# Manager Tests
+# ============================================================================
 
 class TestReplicationManager(unittest.TestCase):
     """Test replication manager."""
@@ -203,6 +221,32 @@ class TestReplicationManager(unittest.TestCase):
 
         manager.shutdown()
 
+    def test_broadcast_operation(self):
+        """Test broadcasting operations."""
+        manager = ReplicationManager(mode='primary', config={})
+
+        operation = ReplicationProtocol.create_set_operation(
+            sequence=1,
+            key="test",
+            value=b"data",
+            db="db",
+            namespace="ns"
+        )
+
+        # Broadcast (should succeed even with no replicas)
+        count = manager.broadcast_operation(operation)
+        self.assertEqual(count, 0)  # No replicas connected
+
+        # Operation should be in log
+        self.assertEqual(len(manager.operation_log), 1)
+        self.assertEqual(manager.operation_log[0].sequence, operation.sequence)
+
+        manager.shutdown()
+
+
+# ============================================================================
+# Backend Tests
+# ============================================================================
 
 class TestNetworkSyncBackend(unittest.TestCase):
     """Test network sync backend."""
@@ -235,6 +279,7 @@ class TestNetworkSyncBackend(unittest.TestCase):
         )
 
         self.assertEqual(backend.mode, 'primary')
+        self.assertTrue(hasattr(backend, 'server'))
         self.assertIsNotNone(backend.server)
 
         # Cleanup
@@ -290,13 +335,48 @@ class TestNetworkSyncBackend(unittest.TestCase):
         # Cleanup
         backend.close_connections()
 
+    def test_read_operations(self):
+        """Test read operations work on both modes."""
+        base_backend = FileSystemStorage(base_path=self.temp_dir_primary)
 
-def run_tests():
-    """Run all tests."""
-    unittest.main(argv=[''], exit=False, verbosity=2)
+        config = {
+            'mode': 'primary',
+            'listen_host': 'localhost',
+            'listen_port': 19003
+        }
 
+        backend = NetworkSyncBackend(
+            base_backend=base_backend,
+            mode='primary',
+            config=config
+        )
+
+        # Write directly to base backend
+        test_path = "test/data"
+        base_backend.ensure_directory_exists("test")
+        base_backend.write_data(test_path, b"test data")
+
+        # Should be able to read
+        data = backend.read_data(test_path)
+        self.assertEqual(data, b"test data")
+
+        # Check existence
+        self.assertTrue(backend.file_exists(test_path))
+        self.assertFalse(backend.file_exists("nonexistent"))
+
+        # Get size
+        size = backend.get_file_size(test_path)
+        self.assertGreater(size, 0)
+
+        # Cleanup
+        backend.close_connections()
+
+
+# ============================================================================
+# Run Tests
+# ============================================================================
 
 if __name__ == '__main__':
     print("Running NADB Replication Tests")
     print("=" * 60)
-    run_tests()
+    unittest.main(verbosity=2)

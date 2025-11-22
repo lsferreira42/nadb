@@ -9,6 +9,7 @@ import json
 import base64
 import hashlib
 import time
+import copy
 from enum import Enum
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass, asdict
@@ -168,21 +169,21 @@ class ReplicationProtocol:
             json_str = json_bytes.decode('utf-8')
             op_dict = json.loads(json_str)
 
-            # Decode base64-encoded values
-            if '_value_encoded' in op_dict['data'] and op_dict['data']['_value_encoded']:
-                op_dict['data']['value'] = base64.b64decode(op_dict['data']['value'])
-                del op_dict['data']['_value_encoded']
-
-            # Validate checksum
+            # Validate checksum BEFORE decoding base64
             received_checksum = op_dict.get('checksum')
             if received_checksum:
-                # Temporarily remove checksum for validation
-                op_dict_copy = op_dict.copy()
+                # Create a copy for validation (before base64 decode)
+                op_dict_copy = copy.deepcopy(op_dict)
                 op_dict_copy['checksum'] = None
                 calculated_checksum = ReplicationProtocol._calculate_checksum(op_dict_copy)
 
                 if received_checksum != calculated_checksum:
                     raise ChecksumMismatchError(calculated_checksum, received_checksum)
+
+            # Decode base64-encoded values AFTER checksum validation
+            if '_value_encoded' in op_dict['data'] and op_dict['data']['_value_encoded']:
+                op_dict['data']['value'] = base64.b64decode(op_dict['data']['value'])
+                del op_dict['data']['_value_encoded']
 
             # Create Operation object
             operation = Operation.from_dict(op_dict)
