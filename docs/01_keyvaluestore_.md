@@ -33,8 +33,9 @@ my_store = KeyValueStore(
     db="my_first_db",          # A name for your database space
     namespace="user_profiles", # A sub-category within the db
     buffer_size_mb=1,          # How much data to keep in memory (explained later)
-    sync=kv_sync               # The sync manager we created
-    # storage_backend="fs"     # Default is filesystem, covered in Chapter 5
+    sync=kv_sync,              # The sync manager we created
+    storage_backend="fs",      # Default is filesystem, covered in Chapter 5
+    compression_enabled=True   # Built-in data zipping tool!
 )
 
 print("KeyValueStore created!")
@@ -54,6 +55,8 @@ In this code:
     *   `namespace`: A sub-section within the database (like an aisle or floor in the warehouse). Using `db` and `namespace` helps keep data separate if you use NADB for multiple purposes.
     *   `buffer_size_mb`: How much data (in megabytes) to temporarily hold in memory before writing to disk. We'll discuss this in [Chapter 6: Data Buffering & Flushing](06_data_buffering___flushing_.md).
     *   `sync`: The `KeyValueSync` instance we created earlier.
+    *   `storage_backend`: Determines where data lives (e.g., `fs` for filesystem or `redis`). Discussed in [Chapter 5: Storage Backends](05_storage_backends__filesystemstorage__redisstorage__.md).
+    *   `compression_enabled`: Instantly reduces byte usage for bulk writes! Discussed in [Chapter 5: Storage Backends](05_storage_backends__filesystemstorage__redisstorage__.md).
 4.  We register `kv_sync.sync_exit` to run when the program exits, ensuring any buffered data gets saved.
 
 ## Basic Operations: Set, Get, Delete

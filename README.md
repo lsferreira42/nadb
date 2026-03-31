@@ -243,12 +243,14 @@ kv_store.set_with_ttl("session:abc123", session_data, 3600, tags=["session"])
 Efficient storage with multiple backends:
 
 ```python
-# Filesystem backend (default)
+# Filesystem backend (default): Batched writes via temp files, with built-in zlib compression
 kv_store = KeyValueStore(storage_backend="fs", compression_enabled=True)
 
-# Redis backend for distributed storage
+# Redis backend for distributed storage: Immediate writes with built-in Connection Pooling
 kv_store = KeyValueStore(storage_backend="redis")
 ```
+
+> 📖 **Read more:** [Storage Backends & Compression](docs/05_storage_backends__filesystemstorage__redisstorage__.md)
 
 ### 📈 Performance Monitoring
 Built-in metrics and statistics:
@@ -347,6 +349,11 @@ kv_redis = KeyValueStore(storage_backend="redis", ...)
 # kv_redis.use_buffering == False
 # kv_redis.set() writes directly to Redis
 ```
+
+### Dynamic Storage Factory
+NADB uses a `StorageFactory` to initialize backend modules seamlessly. You can implement custom backends by matching the required signature, without altering core logic. 
+
+> 📖 **Read more:** [Storage Factory Engine](docs/04_storagefactory_.md)
 
 ### Benefits
 
