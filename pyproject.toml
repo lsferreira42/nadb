@@ -1,0 +1,48 @@
+[build-system]
+requires = [
+    "setuptools>=42",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["nakv_tests.py"]
+python_files = "nakv_tests.py"
+addopts = "-v"
+markers = [
+    "slow: marks tests as slow (deselect with '-k \"not slow\"')",
+]
+
+[tool.flake8]
+max-line-length = 100
+exclude = [
+    "build",
+    "dist",
+    "*.egg-info",
+    ".git",
+    ".tox",
+    "__pycache__",
+]
+
+[tool.pylint.messages_control]
+disable = [
+    "C0111", # missing-docstring
+    "C0103", # invalid-name
+    "R0903", # too-few-public-methods
+]
+
+[tool.pylint.format]
+max-line-length = 100
+
+[tool.coverage.run]
+source = ["nakv"]
+omit = ["nakv_tests.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+]

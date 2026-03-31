@@ -1,0 +1,48 @@
+# IDE and editor files
+.vscode/
+.idea/
+*.sublime-*
+.vim/
+*.swp
+*.swo
+
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+unpacked/
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+coverage.xml
+*.cover
+
+# Project-specific files and directories
+data/
+backups/
+*.db
+*.sqlite
+*.sqlite3
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+.pipy-token
+dump.rdb
+*.log
+
+TODO.md
