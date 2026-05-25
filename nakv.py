@@ -8,13 +8,29 @@ import zlib
 import io
 import statistics
 import weakref
+import hashlib
+import base64
+import tarfile
 from hashlib import blake2b
 from collections import defaultdict
 from datetime import datetime, timedelta
 import logging
-from typing import List, Dict, Any, Optional, Tuple, Union, Set
+from contextlib import contextmanager
+from dataclasses import dataclass
+from typing import List, Dict, Any, Optional, Tuple, Union, Set, Callable, Iterable, Iterator
 
 from storage_backends import StorageFactory
+from _version import __version__
+
+DEFAULT_ENCODING = "utf-8"
+DEFAULT_NAMESPACE = "default"
+DEFAULT_BUFFER_SIZE_MB = 1
+MAX_KEY_LENGTH = 1024
+MAX_NAMESPACE_LENGTH = 256
+MAX_DB_LENGTH = 256
+MAX_TAG_LENGTH = 256
+ValueInput = Union[str, bytes, bytearray, memoryview]
+ReturnType = str
 
 # Try to import advanced features, fall back gracefully if not available
 try:
@@ -60,6 +76,7 @@ class KeyValueMetadata:
         self.sqlite_db = os.path.join(data_folder_path, sqlite_db)
         if not os.path.exists(self.sqlite_db):
             self._create_database()
+        self._migrate_database()
         
         # Use RLock to allow re-entrant lock acquisition (safer for recursive calls)
         self.connection_lock = threading.RLock()
@@ -116,7 +133,15 @@ class KeyValueMetadata:
                 last_updated DATETIME DEFAULT NULL,
                 last_accessed DATETIME DEFAULT NULL,
                 size INTEGER DEFAULT NULL,
+                logical_size INTEGER DEFAULT NULL,
+                stored_size INTEGER DEFAULT NULL,
+                value_type TEXT DEFAULT 'bytes',
+                encoding TEXT DEFAULT NULL,
+                content_type TEXT DEFAULT NULL,
+                checksum TEXT DEFAULT NULL,
+                encrypted INTEGER DEFAULT 0,
                 ttl INTEGER DEFAULT NULL,
+                expires_at DATETIME DEFAULT NULL,
                 UNIQUE (path, key, db, namespace)
             );
 
@@ -144,6 +169,31 @@ class KeyValueMetadata:
         with sqlite3.connect(self.sqlite_db) as conn:
             conn.executescript(schema)
 
+    def _migrate_database(self):
+        """Apply additive metadata schema migrations for existing stores."""
+        columns = {
+            "logical_size": "INTEGER DEFAULT NULL",
+            "stored_size": "INTEGER DEFAULT NULL",
+            "value_type": "TEXT DEFAULT 'bytes'",
+            "encoding": "TEXT DEFAULT NULL",
+            "content_type": "TEXT DEFAULT NULL",
+            "checksum": "TEXT DEFAULT NULL",
+            "encrypted": "INTEGER DEFAULT 0",
+            "expires_at": "DATETIME DEFAULT NULL",
+        }
+        with sqlite3.connect(self.sqlite_db) as conn:
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(metadata)")}
+            for column, definition in columns.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE metadata ADD COLUMN {column} {definition}")
+            conn.execute("CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)")
+            current = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
+            if current is None:
+                conn.execute("INSERT INTO schema_version (version) VALUES (?)", (2,))
+            elif current[0] < 2:
+                conn.execute("UPDATE schema_version SET version = ?", (2,))
+            conn.commit()
+
     def set_metadata(self, metadata: dict):
         # Check if the record already exists
         fetch_sql = '''SELECT id, created_at FROM metadata WHERE path = ? AND key = ? AND db = ? AND namespace = ?'''
@@ -162,14 +212,30 @@ class KeyValueMetadata:
                                 last_updated = ?,
                                 last_accessed = ?,
                                 size = ?,
-                                ttl = ?
+                                logical_size = ?,
+                                stored_size = ?,
+                                value_type = ?,
+                                encoding = ?,
+                                content_type = ?,
+                                checksum = ?,
+                                encrypted = ?,
+                                ttl = ?,
+                                expires_at = ?
                             WHERE path = ? AND key = ? AND db = ? AND namespace = ?'''
                     now = datetime.now().isoformat()
                     params = (
                         now,
                         now,
                         metadata.get("size"),
+                        metadata.get("logical_size", metadata.get("size")),
+                        metadata.get("stored_size", metadata.get("size")),
+                        metadata.get("value_type", "bytes"),
+                        metadata.get("encoding"),
+                        metadata.get("content_type"),
+                        metadata.get("checksum"),
+                        int(bool(metadata.get("encrypted", False))),
                         metadata.get("ttl"),
+                        metadata.get("expires_at"),
                         metadata.get("path"),
                         metadata.get("key"),
                         metadata.get("db"),
@@ -188,8 +254,16 @@ class KeyValueMetadata:
                                 last_updated,
                                 last_accessed,
                                 size,
-                                ttl
-                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+                                logical_size,
+                                stored_size,
+                                value_type,
+                                encoding,
+                                content_type,
+                                checksum,
+                                encrypted,
+                                ttl,
+                                expires_at
+                            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
                     now = datetime.now().isoformat()
                     params = (
                         metadata.get("path"),
@@ -200,7 +274,15 @@ class KeyValueMetadata:
                         now,
                         now,
                         metadata.get("size"),
-                        metadata.get("ttl")
+                        metadata.get("logical_size", metadata.get("size")),
+                        metadata.get("stored_size", metadata.get("size")),
+                        metadata.get("value_type", "bytes"),
+                        metadata.get("encoding"),
+                        metadata.get("content_type"),
+                        metadata.get("checksum"),
+                        int(bool(metadata.get("encrypted", False))),
+                        metadata.get("ttl"),
+                        metadata.get("expires_at")
                     )
                     cursor = db.execute(sql, params)
                     metadata_id = cursor.lastrowid
@@ -271,7 +353,9 @@ class KeyValueMetadata:
             SELECT 
                 m.id, m.path, m.key, m.db, m.namespace, 
                 m.created_at, m.last_updated, m.last_accessed,
-                m.size, m.ttl, GROUP_CONCAT(t.tag_name) as tags
+                m.size, m.logical_size, m.stored_size, m.value_type,
+                m.encoding, m.content_type, m.checksum, m.encrypted, m.ttl,
+                m.expires_at, GROUP_CONCAT(t.tag_name) as tags
             FROM metadata m
             LEFT JOIN metadata_tags mt ON m.id = mt.metadata_id
             LEFT JOIN tags t ON mt.tag_id = t.id
@@ -296,7 +380,7 @@ class KeyValueMetadata:
                 db_conn.commit()
             
             # Parse tags
-            tags = row[10].split(',') if row[10] else []
+            tags = row[18].split(',') if row[18] else []
             
             return {
                 "id": row[0],
@@ -308,7 +392,15 @@ class KeyValueMetadata:
                 "last_updated": row[6],
                 "last_accessed": row[7],
                 "size": row[8],
-                "ttl": row[9],
+                "logical_size": row[9],
+                "stored_size": row[10],
+                "value_type": row[11],
+                "encoding": row[12],
+                "content_type": row[13],
+                "checksum": row[14],
+                "encrypted": bool(row[15]),
+                "ttl": row[16],
+                "expires_at": row[17],
                 "tags": tags
             }
         except sqlite3.Error as e:
@@ -429,7 +521,9 @@ class KeyValueMetadata:
             SELECT 
                 m.id, m.path, m.key, m.db, m.namespace, 
                 m.created_at, m.last_updated, m.last_accessed,
-                m.size, m.ttl, GROUP_CONCAT(t.tag_name) as tags
+                m.size, m.logical_size, m.stored_size, m.value_type,
+                m.encoding, m.content_type, m.checksum, m.encrypted, m.ttl,
+                m.expires_at, GROUP_CONCAT(t.tag_name) as tags
             FROM metadata m
             LEFT JOIN metadata_tags mt ON m.id = mt.metadata_id
             LEFT JOIN tags t ON mt.tag_id = t.id
@@ -448,7 +542,7 @@ class KeyValueMetadata:
                 results = []
                 
                 for row in cursor.fetchall():
-                    tags = row[10].split(',') if row[10] else []
+                    tags = row[18].split(',') if row[18] else []
                     
                     result = {
                         "id": row[0],
@@ -460,7 +554,15 @@ class KeyValueMetadata:
                         "last_updated": row[6],
                         "last_accessed": row[7],
                         "size": row[8],
-                        "ttl": row[9],
+                        "logical_size": row[9],
+                        "stored_size": row[10],
+                        "value_type": row[11],
+                        "encoding": row[12],
+                        "content_type": row[13],
+                        "checksum": row[14],
+                        "encrypted": bool(row[15]),
+                        "ttl": row[16],
+                        "expires_at": row[17],
                         "tags": tags
                     }
                     results.append(result)
@@ -478,9 +580,14 @@ class KeyValueMetadata:
         sql = """
             SELECT id, path, key, db, namespace
             FROM metadata
-            WHERE ttl IS NOT NULL 
-              AND last_updated IS NOT NULL
-              AND datetime(last_updated, '+' || ttl || ' seconds') < ?
+            WHERE (
+                expires_at IS NOT NULL AND expires_at < ?
+            ) OR (
+                expires_at IS NULL
+                AND ttl IS NOT NULL
+                AND last_updated IS NOT NULL
+                AND datetime(last_updated, '+' || ttl || ' seconds') < ?
+            )
         """
         
         try:
@@ -488,7 +595,7 @@ class KeyValueMetadata:
             expired_items = []
             
             with self.connection_lock:
-                cursor = db_conn.execute(sql, (now,))
+                cursor = db_conn.execute(sql, (now, now))
                 expired_entries = cursor.fetchall()
                 
                 # Delete expired entries
@@ -687,27 +794,158 @@ class PerformanceMetrics:
             return metrics
 
 
+@dataclass
+class StoredValue:
+    """Rich value returned when a store uses return_type='stored'."""
+    value: bytes
+    metadata: Dict[str, Any]
+    ttl_remaining: Optional[int] = None
+
+    @property
+    def bytes(self) -> bytes:
+        return self.value
+
+    @property
+    def encoding(self) -> Optional[str]:
+        return self.metadata.get("encoding")
+
+    @property
+    def content_type(self) -> Optional[str]:
+        return self.metadata.get("content_type")
+
+    @property
+    def created_at(self) -> Optional[str]:
+        return self.metadata.get("created_at")
+
+    @property
+    def etag(self) -> Optional[str]:
+        return self.metadata.get("checksum")
+
+    @property
+    def text(self) -> str:
+        encoding = self.encoding or DEFAULT_ENCODING
+        return self.value.decode(encoding)
+
+
+class QueryBuilder:
+    """Small fluent query builder over NADB metadata."""
+
+    def __init__(self, store: "KeyValueStore"):
+        self.store = store
+        self.tags: List[str] = []
+        self.filters: Dict[str, Any] = {}
+        self.prefix_value: Optional[str] = None
+        self.limit_value: Optional[int] = None
+        self.offset_value: int = 0
+        self.order_field: str = "key"
+        self.order_reverse: bool = False
+
+    def tag(self, tag: str) -> "QueryBuilder":
+        self.tags.append(tag)
+        return self
+
+    def where(self, field: str, value: Any) -> "QueryBuilder":
+        self.filters[field] = value
+        return self
+
+    def prefix(self, prefix: str) -> "QueryBuilder":
+        self.prefix_value = prefix
+        return self
+
+    def limit(self, limit: int) -> "QueryBuilder":
+        self.limit_value = limit
+        return self
+
+    def offset(self, offset: int) -> "QueryBuilder":
+        self.offset_value = offset
+        return self
+
+    def order_by(self, field: str, reverse: bool = False) -> "QueryBuilder":
+        self.order_field = field
+        self.order_reverse = reverse
+        return self
+
+    def all(self) -> List[Dict[str, Any]]:
+        return self.store.query_metadata(
+            tags=self.tags or None,
+            prefix=self.prefix_value,
+            order_by=self.order_field,
+            reverse=self.order_reverse,
+            limit=self.limit_value,
+            offset=self.offset_value,
+            **self.filters
+        )
+
+    def keys(self) -> List[str]:
+        return [item["key"] for item in self.all()]
+
+
+class _StoreWriter(io.BytesIO):
+    """BytesIO writer that commits to a key on close."""
+
+    def __init__(self, store: "KeyValueStore", key: str, tags: Optional[List[str]], chunk_size: Optional[int]):
+        super().__init__()
+        self.store = store
+        self.key = key
+        self.tags = tags
+        self.chunk_size = chunk_size
+        self._committed = False
+
+    def close(self):
+        if not self._committed:
+            data = self.getvalue()
+            if self.chunk_size:
+                self.store.set_chunked(self.key, data, self.chunk_size, self.tags)
+            else:
+                self.store.set_bytes(self.key, data, self.tags)
+            self._committed = True
+        super().close()
+
+
 class KeyValueStore:
     """A key-value store that persists data to disk with advanced features."""
 
     def __init__(
         self,
-        data_folder_path: str,
-        db: str,
-        buffer_size_mb: float,
-        namespace: str,
-        sync: 'KeyValueSync',
+        data_folder_path: str = "./data",
+        db: str = "default",
+        buffer_size_mb: float = DEFAULT_BUFFER_SIZE_MB,
+        namespace: str = DEFAULT_NAMESPACE,
+        sync: Optional['KeyValueSync'] = None,
         compression_enabled: bool = True,
         storage_backend: str = "fs",
         enable_transactions: bool = True,
         enable_backup: bool = True,
         enable_indexing: bool = True,
-        cache_size: int = 10000
+        cache_size: int = 10000,
+        storage_options: Optional[Dict[str, Any]] = None,
+        allow_backend_fallback: bool = False,
+        default_encoding: str = DEFAULT_ENCODING,
+        return_type: ReturnType = "bytes",
+        encryption_key: Optional[Union[str, bytes]] = None,
+        cache_ttl_seconds: Optional[int] = None,
+        max_cache_memory_bytes: Optional[int] = None,
+        enable_otel: bool = False
     ) -> None:
+        self._validate_identifier(db, "db", MAX_DB_LENGTH)
+        self._validate_identifier(namespace, "namespace", MAX_NAMESPACE_LENGTH)
         self.data_folder_path = data_folder_path
         self.buffer_size_mb = buffer_size_mb
         self.db = db
         self.namespace = namespace
+        self.default_encoding = default_encoding
+        self.return_type = return_type
+        self.encryption_key = encryption_key.encode(default_encoding) if isinstance(encryption_key, str) else encryption_key
+        self.cache_ttl_seconds = cache_ttl_seconds
+        self.max_cache_memory_bytes = max_cache_memory_bytes
+        self.enable_otel = enable_otel
+        self._watchers: Dict[str, List[Callable[..., None]]] = defaultdict(list)
+        self._validators: List[Callable[[str, bytes, Dict[str, Any]], None]] = []
+        self._transformers: List[Callable[[str, bytes, Dict[str, Any]], Union[bytes, Tuple[bytes, Dict[str, Any]]]]] = []
+        self._custom_indexes: Dict[str, Dict[Any, Set[str]]] = defaultdict(lambda: defaultdict(set))
+        self._indexed_fields: Set[str] = set()
+        self._otel_counters = defaultdict(int)
+        self._owns_sync = sync is None
         self.buffer = {}  # In-memory buffer
         self.current_buffer_size = 0
         self.buffer_lock = threading.RLock()  # Lock for buffer operations
@@ -724,12 +962,19 @@ class KeyValueStore:
             self.perf_logger = None
         
         # Initialize the storage backend
-        self.storage = StorageFactory.create_storage(storage_backend, base_path=data_folder_path)
+        storage_kwargs = {"base_path": data_folder_path}
+        if storage_options:
+            storage_kwargs.update(storage_options)
+        self.storage = StorageFactory.create_storage(
+            storage_backend,
+            allow_backend_fallback=allow_backend_fallback,
+            **storage_kwargs
+        )
 
         # Get backend capabilities
         self.capabilities = self.storage.get_capabilities()
 
-        # DEPRECATED: Keep for backward compatibility (will be removed in v3.0)
+        # DEPRECATED: Keep for backward compatibility; internal code should use capabilities.
         self.is_redis_backend = storage_backend == "redis"
 
         # Determine write strategy based on capabilities
@@ -750,8 +995,10 @@ class KeyValueStore:
         os.makedirs(data_folder_path, exist_ok=True)
         
         # Register with sync engine
-        self.sync = sync
-        sync.register_store(self)
+        self.sync = sync or KeyValueSync(flush_interval_seconds=1)
+        if self._owns_sync:
+            self.sync.start()
+        self.sync.register_store(self)
         
         # Compression
         self.compression_enabled = compression_enabled
@@ -770,14 +1017,23 @@ class KeyValueStore:
             self.backup_manager = None
             if enable_backup and not BACKUP_AVAILABLE:
                 self.logger.warning("Backup requested but not available - install advanced features")
-        
+
+        self._reconcile_metadata()
+
         if enable_indexing and INDEXING_AVAILABLE:
             self.index_manager = IndexManager(self, cache_size)
+            if cache_ttl_seconds is not None:
+                self.index_manager.query_cache.default_ttl = cache_ttl_seconds
+                self.index_manager.metadata_cache.default_ttl = cache_ttl_seconds
+            if max_cache_memory_bytes is not None:
+                approx_items = max(1, max_cache_memory_bytes // 512)
+                self.index_manager.query_cache.max_size = min(self.index_manager.query_cache.max_size, approx_items)
+                self.index_manager.metadata_cache.max_size = min(self.index_manager.metadata_cache.max_size, approx_items)
         else:
             self.index_manager = None
             if enable_indexing and not INDEXING_AVAILABLE:
                 self.logger.warning("Indexing requested but not available - install advanced features")
-        
+
         self.logger.info(f"KeyValueStore initialized: {db}.{namespace} on {storage_backend} backend")
 
     def _get_hash(self, key: str) -> str:
@@ -786,6 +1042,183 @@ class KeyValueStore:
         h = blake2b(digest_size=16)
         h.update(f"{self.db}:{self.namespace}:{key}".encode('utf-8'))
         return h.hexdigest()
+
+    @classmethod
+    def open(cls, *args, **kwargs):
+        """Open a store that can be used as a context manager."""
+        return cls(*args, **kwargs)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
+
+    @staticmethod
+    def _validate_identifier(value: str, field_name: str, max_length: int) -> None:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field_name} must be a non-empty string")
+        if len(value) > max_length:
+            raise ValueError(f"{field_name} must be at most {max_length} characters")
+        if "\x00" in value:
+            raise ValueError(f"{field_name} must not contain NUL bytes")
+
+    def _validate_key(self, key: str) -> None:
+        self._validate_identifier(key, "Key", MAX_KEY_LENGTH)
+
+    def _validate_tags(self, tags: Optional[List[str]]) -> None:
+        if tags is None:
+            return
+        if not isinstance(tags, list):
+            raise TypeError("Tags must be a list")
+        for tag in tags:
+            self._validate_identifier(tag, "Tag", MAX_TAG_LENGTH)
+
+    def _safe_key(self, key: str) -> str:
+        return blake2b(key.encode("utf-8"), digest_size=8).hexdigest()
+
+    def _normalize_value(
+        self,
+        value: ValueInput,
+        encoding: Optional[str] = None,
+        content_type: Optional[str] = None,
+        value_type: Optional[str] = None
+    ) -> Tuple[bytes, Dict[str, Any]]:
+        """Convert supported public values to bytes and return type metadata."""
+        encoding = encoding or self.default_encoding
+        if isinstance(value, str):
+            data = value.encode(encoding)
+            metadata = {
+                "value_type": value_type or "text",
+                "encoding": encoding,
+                "content_type": content_type or "text/plain; charset=" + encoding,
+            }
+        elif isinstance(value, bytes):
+            data = value
+            metadata = {
+                "value_type": value_type or "bytes",
+                "encoding": None,
+                "content_type": content_type or "application/octet-stream",
+            }
+        elif isinstance(value, (bytearray, memoryview)):
+            data = bytes(value)
+            metadata = {
+                "value_type": value_type or "bytes",
+                "encoding": None,
+                "content_type": content_type or "application/octet-stream",
+            }
+        else:
+            raise TypeError("Value must be str, bytes, bytearray, or memoryview")
+        return data, metadata
+
+    def _checksum(self, data: bytes) -> str:
+        return hashlib.sha256(data).hexdigest()
+
+    def _validate_value_size(self, data: bytes) -> None:
+        max_size = self.capabilities.max_value_size_bytes
+        if max_size is not None and len(data) > max_size:
+            raise ValueError(f"Value size {len(data)} exceeds backend limit of {max_size} bytes")
+
+    def _xor_crypt(self, data: bytes) -> bytes:
+        if not self.encryption_key:
+            return data
+        out = bytearray()
+        counter = 0
+        while len(out) < len(data):
+            block = hashlib.sha256(self.encryption_key + counter.to_bytes(8, "big")).digest()
+            out.extend(block)
+            counter += 1
+        return bytes(b ^ k for b, k in zip(data, out))
+
+    def _prepare_for_storage(self, data: bytes) -> bytes:
+        return self._xor_crypt(data) if self.encryption_key else data
+
+    def _restore_from_storage(self, data: bytes, metadata: Optional[Dict[str, Any]]) -> bytes:
+        if metadata and metadata.get("encrypted"):
+            return self._xor_crypt(data)
+        return data
+
+    def _record_otel(self, operation: str, **attrs):
+        self._otel_counters[operation] += 1
+        if not self.enable_otel:
+            return
+        try:
+            from opentelemetry import trace
+            tracer = trace.get_tracer("nadb")
+            with tracer.start_as_current_span(f"nadb.{operation}") as span:
+                for key, value in attrs.items():
+                    span.set_attribute(key, value)
+        except Exception:
+            # OpenTelemetry is intentionally optional.
+            return
+
+    def _emit_event(self, event: str, key: Optional[str] = None, **payload):
+        for callback in list(self._watchers.get(event, [])) + list(self._watchers.get("*", [])):
+            try:
+                callback(event=event, key=key, store=self, **payload)
+            except Exception as exc:
+                self.logger.warning(f"Watcher for {event} failed: {exc}")
+
+    def watch(self, event: str, callback: Callable[..., None]):
+        """Register a callback for set/delete/expire/restore events."""
+        self._watchers[event].append(callback)
+        return callback
+
+    def unwatch(self, event: str, callback: Callable[..., None]) -> bool:
+        if callback in self._watchers.get(event, []):
+            self._watchers[event].remove(callback)
+            return True
+        return False
+
+    def add_validator(self, validator: Callable[[str, bytes, Dict[str, Any]], None]):
+        self._validators.append(validator)
+        return validator
+
+    def add_transformer(self, transformer: Callable[[str, bytes, Dict[str, Any]], Union[bytes, Tuple[bytes, Dict[str, Any]]]]):
+        self._transformers.append(transformer)
+        return transformer
+
+    def _apply_hooks(self, key: str, value: bytes, metadata: Dict[str, Any]) -> Tuple[bytes, Dict[str, Any]]:
+        for transformer in self._transformers:
+            result = transformer(key, value, metadata)
+            if isinstance(result, tuple):
+                value, extra = result
+                metadata.update(extra or {})
+            elif result is not None:
+                value = result
+        for validator in self._validators:
+            validator(key, value, metadata)
+        return value, metadata
+
+    def _format_return_value(self, key: str, value: bytes, metadata: Optional[Dict[str, Any]]) -> Union[bytes, str, StoredValue]:
+        if self.return_type == "bytes":
+            return value
+        if self.return_type == "str":
+            encoding = (metadata or {}).get("encoding") or self.default_encoding
+            return value.decode(encoding)
+        if self.return_type == "stored":
+            ttl_remaining = None
+            try:
+                ttl_remaining = self.ttl(key)
+            except Exception:
+                ttl_remaining = None
+            return StoredValue(value=value, metadata=metadata or {}, ttl_remaining=ttl_remaining)
+        raise ValueError("return_type must be 'bytes', 'str', or 'stored'")
+
+    def _reconcile_metadata(self) -> None:
+        """Remove metadata entries whose value is missing on startup."""
+        try:
+            entries = self._query_metadata({"db": self.db, "namespace": self.namespace})
+            removed = 0
+            for entry in entries:
+                if not self.storage.file_exists(entry["path"]):
+                    self._delete_metadata(entry["key"])
+                    removed += 1
+            if removed:
+                self.logger.warning(f"Removed {removed} metadata entries with missing stored values")
+        except Exception as exc:
+            self.logger.warning(f"Metadata reconciliation skipped: {exc}")
         
     def _get_path(self, key: str) -> str:
         """Get the relative path for the key's storage location."""
@@ -821,7 +1254,7 @@ class KeyValueStore:
         
     def _is_compressed(self, data: bytes) -> bool:
         """Check if data has the compression header."""
-        return data and data.startswith(b'CMP:')
+        return self.storage._is_compressed(data)
 
     def _get_metadata(self, key: str) -> Optional[Dict[str, Any]]:
         """
@@ -843,7 +1276,8 @@ class KeyValueStore:
         if self.capabilities.supports_metadata:
             return self.storage.set_metadata(metadata)
         else:
-            return self.metadata.set_metadata(metadata)
+            self.metadata.set_metadata(metadata)
+            return True
 
     def _delete_metadata(self, key: str) -> bool:
         """
@@ -854,7 +1288,8 @@ class KeyValueStore:
         if self.capabilities.supports_metadata:
             return self.storage.delete_metadata(key, self.db, self.namespace)
         else:
-            return self.metadata.delete_metadata(key, self.db, self.namespace)
+            self.metadata.delete_metadata(key, self.db, self.namespace)
+            return True
 
     def _query_metadata(self, query: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
@@ -892,21 +1327,28 @@ class KeyValueStore:
 
                 # Get lock for this key
                 with self._get_lock(key):
-                    # Compress data if needed
-                    data_to_write = self._compress_data(value)
+                    stored_value = self._prepare_for_storage(value)
+                    data_to_write = self._compress_data(stored_value)
 
                     # Write data to file using storage backend
                     success = self.storage.write_data(path, data_to_write)
 
                     if success:
                         # Update metadata
+                        existing_metadata = self._get_metadata(key) or {}
                         metadata = {
+                            **existing_metadata,
                             "path": path,
                             "key": key,
                             "db": self.db,
                             "namespace": self.namespace,
-                            "size": len(data_to_write),
-                            "ttl": None  # Default no TTL
+                            "size": existing_metadata.get("logical_size", len(value)),
+                            "logical_size": existing_metadata.get("logical_size", len(value)),
+                            "stored_size": len(data_to_write),
+                            "checksum": existing_metadata.get("checksum") or self._checksum(value),
+                            "encrypted": bool(self.encryption_key) or existing_metadata.get("encrypted", False),
+                            "ttl": existing_metadata.get("ttl"),
+                            "expires_at": existing_metadata.get("expires_at"),
                         }
                         # Use unified metadata interface
                         self._set_metadata(metadata)
@@ -918,7 +1360,7 @@ class KeyValueStore:
                 self.metrics.record_operation('flush', duration_ms, len(value))
 
             except Exception as e:
-                logging.error(f"Error flushing key {key} to disk: {str(e)}")
+                logging.error(f"Error flushing key hash {self._safe_key(key)} to disk: {str(e)}")
                 # Track failed writes for re-adding
                 failed_items[key] = value
 
@@ -931,7 +1373,7 @@ class KeyValueStore:
                         self.buffer[key] = value
                         self.current_buffer_size += len(value)
                 
-    def _write_key_to_disk(self, key, value):
+    def _write_key_to_disk(self, key, value, metadata_extra: Optional[Dict[str, Any]] = None):
         """Write a single key-value pair to disk.
         
         Args:
@@ -945,8 +1387,8 @@ class KeyValueStore:
             # Get file path
             path = self._get_path(key)
             
-            # Compress data if needed
-            data_to_write = self._compress_data(value)
+            stored_value = self._prepare_for_storage(value)
+            data_to_write = self._compress_data(stored_value)
             
             # Write data to file using storage backend
             success = self.storage.write_data(path, data_to_write)
@@ -958,49 +1400,82 @@ class KeyValueStore:
                     "key": key,
                     "db": self.db,
                     "namespace": self.namespace,
-                    "size": len(data_to_write),
+                    "size": len(value),
+                    "logical_size": len(value),
+                    "stored_size": len(data_to_write),
+                    "checksum": self._checksum(value),
+                    "encrypted": bool(self.encryption_key),
                 }
+                if metadata_extra:
+                    metadata.update(metadata_extra)
                 # Use unified metadata interface
                 self._set_metadata(metadata)
                 
             return success
         except Exception as e:
-            logging.error(f"Error writing key {key} to disk: {e}")
+            logging.error(f"Error writing key hash {self._safe_key(key)} to disk: {e}")
             return False
 
-    def _immediate_set(self, key: str, value: bytes, tags: List[str] = None, ttl: int = None):
+    def _immediate_set(
+        self,
+        key: str,
+        value: bytes,
+        tags: List[str] = None,
+        ttl: int = None,
+        value_metadata: Optional[Dict[str, Any]] = None
+    ):
         """
         Immediate write strategy - write directly to storage without buffering.
 
         Used for backends like Redis that are fast and don't benefit from buffering.
         """
         data_len = len(value)
+        self._validate_value_size(value)
         path = self._get_path(key)
-        data_to_write = self._compress_data(value)
-
-        # Write directly to storage
-        success = self.storage.write_data(path, data_to_write)
-        if not success:
-            self.logger.error(f"Immediate write failed for key {key}")
-            raise IOError(f"Failed to write key {key} to storage backend")
-
-        # Create and store metadata
+        expires_at = (datetime.now() + timedelta(seconds=ttl)).isoformat() if ttl else None
         metadata = {
             "path": path,
             "key": key,
             "db": self.db,
             "namespace": self.namespace,
             "size": data_len,
-            "ttl": ttl
+            "logical_size": data_len,
+            "stored_size": None,
+            "checksum": self._checksum(value),
+            "encrypted": bool(self.encryption_key),
+            "ttl": ttl,
+            "expires_at": expires_at,
         }
+        if value_metadata:
+            metadata.update(value_metadata)
+        value, metadata = self._apply_hooks(key, value, metadata)
+        stored_value = self._prepare_for_storage(value)
+        data_to_write = self._compress_data(stored_value)
+        metadata.update({
+            "size": len(value),
+            "logical_size": len(value),
+            "stored_size": len(data_to_write),
+            "checksum": self._checksum(value),
+            "encrypted": bool(self.encryption_key),
+        })
         if tags:
             metadata["tags"] = tags
 
-        self._set_metadata(metadata)
+        success = self.storage.write_data(path, data_to_write)
+        if not success:
+            self.logger.error(f"Immediate write failed for key hash {self._safe_key(key)}")
+            raise IOError(f"Failed to write key {key} to storage backend")
+
+        if not self._set_metadata(metadata):
+            self.storage.delete_file(path)
+            raise IOError(f"Failed to write metadata for key {key}")
 
         # Update indexes
         if self.index_manager:
             self.index_manager.add_key_to_indexes(key, tags or [], metadata)
+        self._update_custom_indexes_for_key(key, metadata, value)
+        self._emit_event("set", key, metadata=metadata)
+        self._record_otel("set", db=self.db, namespace=self.namespace)
 
         # Remove from buffer if it exists (edge case)
         with self.buffer_lock:
@@ -1008,13 +1483,45 @@ class KeyValueStore:
                 self.current_buffer_size -= len(self.buffer[key])
                 del self.buffer[key]
 
-    def _buffered_set(self, key: str, value: bytes, tags: List[str] = None, ttl: int = None):
+    def _buffered_set(
+        self,
+        key: str,
+        value: bytes,
+        tags: List[str] = None,
+        ttl: int = None,
+        value_metadata: Optional[Dict[str, Any]] = None
+    ):
         """
         Buffered write strategy - write to in-memory buffer first.
 
         Used for backends like filesystem that benefit from batched writes.
         """
         data_len = len(value)
+        self._validate_value_size(value)
+        expires_at = (datetime.now() + timedelta(seconds=ttl)).isoformat() if ttl else None
+        metadata = {
+            "path": self._get_path(key),
+            "key": key,
+            "db": self.db,
+            "namespace": self.namespace,
+            "size": data_len,
+            "logical_size": data_len,
+            "stored_size": None,
+            "checksum": self._checksum(value),
+            "encrypted": bool(self.encryption_key),
+            "ttl": ttl,
+            "expires_at": expires_at,
+        }
+        if value_metadata:
+            metadata.update(value_metadata)
+        value, metadata = self._apply_hooks(key, value, metadata)
+        data_len = len(value)
+        metadata.update({
+            "size": data_len,
+            "logical_size": data_len,
+            "checksum": self._checksum(value),
+            "encrypted": bool(self.encryption_key),
+        })
 
         # Use buffer_lock to prevent race conditions with flush
         with self.buffer_lock:
@@ -1023,16 +1530,6 @@ class KeyValueStore:
                 self.current_buffer_size -= len(self.buffer[key])
             self.buffer[key] = value
             self.current_buffer_size += data_len
-
-        # Update metadata
-        metadata = {
-            "path": self._get_path(key),
-            "key": key,
-            "db": self.db,
-            "namespace": self.namespace,
-            "size": data_len,
-            "ttl": ttl
-        }
         if tags:
             metadata["tags"] = tags
 
@@ -1041,16 +1538,27 @@ class KeyValueStore:
         # Update indexes
         if self.index_manager:
             self.index_manager.add_key_to_indexes(key, tags or [], metadata)
+        self._update_custom_indexes_for_key(key, metadata, value)
+        self._emit_event("set", key, metadata=metadata)
+        self._record_otel("set", db=self.db, namespace=self.namespace)
 
         # Check if we need to flush the buffer
         self.flush_if_needed()
 
-    def set(self, key: str, value: bytes, tags: List[str] = None):
+    def set(
+        self,
+        key: str,
+        value: ValueInput,
+        tags: List[str] = None,
+        encoding: Optional[str] = None,
+        content_type: Optional[str] = None,
+        value_type: Optional[str] = None
+    ):
         """Set a key-value pair, optionally with tags.
 
         Args:
             key: The key for the value (non-empty string)
-            value: Binary data to store
+            value: Text or binary data to store
             tags: Optional list of tags for search/categorization
 
         Raises:
@@ -1058,27 +1566,22 @@ class KeyValueStore:
             ValueError: If key is empty or None
         """
         # Input validation
-        if not key or not isinstance(key, str):
-            raise ValueError("Key must be a non-empty string")
-        if not isinstance(value, bytes):
-            raise TypeError("Value must be bytes")
-        if tags is not None:
-            if not isinstance(tags, list):
-                raise TypeError("Tags must be a list")
-            if not all(isinstance(t, str) for t in tags):
-                raise TypeError("All tags must be strings")
+        self._validate_key(key)
+        self._validate_tags(tags)
+        value_bytes, value_metadata = self._normalize_value(value, encoding, content_type, value_type)
 
-        op_id = f"set_{key}_{int(time.time() * 1000)}"
+        safe_key = self._safe_key(key)
+        op_id = f"set_{safe_key}_{int(time.time() * 1000)}"
         if self.perf_logger:
-            self.perf_logger.start_operation(op_id, "set", key=key, data_size=len(value))
+            self.perf_logger.start_operation(op_id, "set", key_hash=safe_key, data_size=len(value_bytes))
 
         try:
             with self._get_lock(key):
                 # Use write strategy based on backend capabilities
                 if self.use_buffering:
-                    self._buffered_set(key, value, tags)
+                    self._buffered_set(key, value_bytes, tags, value_metadata=value_metadata)
                 else:
-                    self._immediate_set(key, value, tags)
+                    self._immediate_set(key, value_bytes, tags, value_metadata=value_metadata)
 
             if self.perf_logger:
                 self.perf_logger.end_operation(op_id, success=True)
@@ -1086,10 +1589,19 @@ class KeyValueStore:
         except Exception as e:
             if self.perf_logger:
                 self.perf_logger.end_operation(op_id, success=False, error=str(e))
-            self.logger.error(f"Failed to set key {key}: {e}")
+            self.logger.error(f"Failed to set key hash {safe_key}: {e}")
             raise
             
-    def set_with_ttl(self, key: str, value: bytes, ttl_seconds: int, tags: List[str] = None):
+    def set_with_ttl(
+        self,
+        key: str,
+        value: ValueInput,
+        ttl_seconds: int,
+        tags: List[str] = None,
+        encoding: Optional[str] = None,
+        content_type: Optional[str] = None,
+        value_type: Optional[str] = None
+    ):
         """Set a key-value pair with a time-to-live.
 
         Args:
@@ -1102,9 +1614,9 @@ class KeyValueStore:
             TypeError: If value is not bytes
             ValueError: If TTL is not a positive integer
         """
-        if not isinstance(value, bytes):
-            raise TypeError("Value must be bytes")
-
+        self._validate_key(key)
+        self._validate_tags(tags)
+        value_bytes, value_metadata = self._normalize_value(value, encoding, content_type, value_type)
         if not isinstance(ttl_seconds, int) or ttl_seconds <= 0:
             raise ValueError("TTL must be a positive integer")
 
@@ -1116,17 +1628,17 @@ class KeyValueStore:
                 # This ensures TTL tracking starts immediately
                 if self.capabilities.supports_native_ttl:
                     # Backend has native TTL support (Redis)
-                    self._immediate_set(key, value, tags, ttl=ttl_seconds)
+                    self._immediate_set(key, value_bytes, tags, ttl=ttl_seconds, value_metadata=value_metadata)
                 else:
                     # Backend doesn't have native TTL - use buffering but mark for TTL tracking
                     # For now, force immediate write for TTL consistency
-                    self._immediate_set(key, value, tags, ttl=ttl_seconds)
+                    self._immediate_set(key, value_bytes, tags, ttl=ttl_seconds, value_metadata=value_metadata)
 
             duration_ms = (time.time() - start_time) * 1000
-            self.metrics.record_operation('set_with_ttl', duration_ms, len(value))
+            self.metrics.record_operation('set_with_ttl', duration_ms, len(value_bytes))
 
         except Exception as e:
-            self.logger.error(f"Failed to set key {key} with TTL: {e}")
+            self.logger.error(f"Failed to set key hash {self._safe_key(key)} with TTL: {e}")
             raise
             
     def get(self, key: str) -> bytes:
@@ -1143,8 +1655,7 @@ class KeyValueStore:
             ValueError: If key is empty or None
         """
         # Input validation
-        if not key or not isinstance(key, str):
-            raise ValueError("Key must be a non-empty string")
+        self._validate_key(key)
 
         start_time = time.time()
 
@@ -1153,16 +1664,15 @@ class KeyValueStore:
             with self._get_lock(key):
                 if key in self.buffer:
                     value = self.buffer[key]
+                    metadata = self._get_metadata(key)
                     # Record the operation and return
                     duration_ms = (time.time() - start_time) * 1000
                     self.metrics.record_operation('get', duration_ms, len(value))
-                    return value
+                    self._record_otel("get", db=self.db, namespace=self.namespace, cache_hit=True)
+                    return self._format_return_value(key, value, metadata)
                     
                 # If not in buffer, get metadata to check if it exists
-                if self.is_redis_backend:
-                    metadata = self.storage.get_metadata(key, self.db, self.namespace)
-                else:
-                    metadata = self.metadata.get_metadata(key, self.db, self.namespace)
+                metadata = self._get_metadata(key)
                 
                 if not metadata:
                     raise KeyError(f"Key '{key}' not found")
@@ -1180,10 +1690,15 @@ class KeyValueStore:
                     
                 # Decompress if needed
                 value = self._decompress_data(value)
+                value = self._restore_from_storage(value, metadata)
+                checksum = metadata.get("checksum") if metadata else None
+                if checksum and self._checksum(value) != checksum:
+                    raise ValueError(f"Checksum mismatch for key '{key}'")
                 
             duration_ms = (time.time() - start_time) * 1000
             self.metrics.record_operation('get', duration_ms, len(value))
-            return value
+            self._record_otel("get", db=self.db, namespace=self.namespace, cache_hit=False)
+            return self._format_return_value(key, value, metadata)
             
         except KeyError:
             # Key doesn't exist, record the failed operation
@@ -1200,9 +1715,204 @@ class KeyValueStore:
         Returns:
             Dictionary with 'value' and 'metadata' keys
         """
-        value = self.get(key)  # This will raise KeyError if the key doesn't exist
+        value = self.get_bytes(key)  # This will raise KeyError if the key doesn't exist
         metadata = self._get_metadata(key)
         return {"value": value, "metadata": metadata}
+
+    def get_bytes(self, key: str) -> bytes:
+        """Get a value as bytes."""
+        old_return_type = self.return_type
+        self.return_type = "bytes"
+        try:
+            return self.get(key)
+        finally:
+            self.return_type = old_return_type
+
+    def get_text(self, key: str, encoding: Optional[str] = None) -> str:
+        """Get a value decoded as text."""
+        result = self.get_with_metadata(key)
+        metadata = result.get("metadata") or {}
+        effective_encoding = encoding or metadata.get("encoding") or self.default_encoding
+        return result["value"].decode(effective_encoding)
+
+    def set_text(self, key: str, value: str, tags: List[str] = None, encoding: Optional[str] = None,
+                 content_type: Optional[str] = None):
+        """Store text data."""
+        return self.set(key, value, tags=tags, encoding=encoding, content_type=content_type)
+
+    def set_bytes(self, key: str, value: ValueInput, tags: List[str] = None,
+                  content_type: Optional[str] = None):
+        """Store binary data."""
+        value_bytes, _ = self._normalize_value(value, content_type=content_type)
+        return self.set(key, value_bytes, tags=tags, content_type=content_type)
+
+    def set_json(self, key: str, value: Any, tags: List[str] = None, **json_kwargs):
+        """Serialize and store a JSON value as UTF-8 text."""
+        data = json.dumps(value, **json_kwargs)
+        return self.set(key, data, tags=tags, content_type="application/json", value_type="json")
+
+    def get_json(self, key: str) -> Any:
+        """Read and deserialize a JSON value."""
+        return json.loads(self.get_text(key))
+
+    def get_or_none(self, key: str) -> Optional[bytes]:
+        """Return a value or None when the key does not exist."""
+        try:
+            return self.get(key)
+        except KeyError:
+            return None
+
+    def get_or_default(self, key: str, default: Any = None) -> Any:
+        """Return a value or the supplied default when the key does not exist."""
+        try:
+            return self.get(key)
+        except KeyError:
+            return default
+
+    def exists(self, key: str) -> bool:
+        """Return True if the key exists."""
+        self._validate_key(key)
+        with self._get_lock(key):
+            if key in self.buffer:
+                return True
+            metadata = self._get_metadata(key)
+            return bool(metadata and self.storage.file_exists(metadata["path"]))
+
+    def ttl(self, key: str) -> Optional[int]:
+        """Return remaining TTL seconds, None for persistent keys, or raise KeyError."""
+        self._validate_key(key)
+        metadata = self._get_metadata(key)
+        if not metadata:
+            raise KeyError(f"Key '{key}' not found")
+        expires_at = metadata.get("expires_at")
+        if not expires_at:
+            ttl_value = metadata.get("ttl")
+            updated = metadata.get("last_updated")
+            if ttl_value and updated:
+                expires_at = (datetime.fromisoformat(updated) + timedelta(seconds=int(ttl_value))).isoformat()
+            else:
+                return None
+        remaining = int((datetime.fromisoformat(expires_at) - datetime.now()).total_seconds())
+        return max(0, remaining)
+
+    def set_with_expires_at(self, key: str, value: ValueInput, expires_at: datetime,
+                            tags: List[str] = None, **kwargs):
+        ttl_seconds = int((expires_at - datetime.now()).total_seconds())
+        if ttl_seconds <= 0:
+            raise ValueError("expires_at must be in the future")
+        return self.set_with_ttl(key, value, ttl_seconds, tags=tags, **kwargs)
+
+    def set_with_timedelta(self, key: str, value: ValueInput, ttl: timedelta,
+                           tags: List[str] = None, **kwargs):
+        return self.set_with_ttl(key, value, int(ttl.total_seconds()), tags=tags, **kwargs)
+
+    def persist_ttl(self, key: str):
+        """Remove expiration from a key."""
+        metadata = self._get_metadata(key)
+        if not metadata:
+            raise KeyError(f"Key '{key}' not found")
+        metadata["ttl"] = None
+        metadata["expires_at"] = None
+        self._set_metadata(metadata)
+        return True
+
+    def get_stored(self, key: str) -> StoredValue:
+        old_return_type = self.return_type
+        self.return_type = "stored"
+        try:
+            return self.get(key)
+        finally:
+            self.return_type = old_return_type
+
+    def set_many(self, items: Union[Dict[str, ValueInput], Iterable[Tuple[str, ValueInput]]],
+                 tags: List[str] = None, atomic: bool = False) -> Dict[str, bool]:
+        pairs = items.items() if isinstance(items, dict) else items
+        results = {}
+        if atomic:
+            with self.transaction() as tx:
+                for key, value in pairs:
+                    tx.set(key, value, tags)
+                    results[key] = True
+            return results
+        for key, value in pairs:
+            try:
+                self.set(key, value, tags=tags)
+                results[key] = True
+            except Exception:
+                results[key] = False
+        return results
+
+    def get_many(self, keys: Iterable[str], default: Any = None) -> Dict[str, Any]:
+        return {key: self.get_or_default(key, default) for key in keys}
+
+    def delete_many(self, keys: Iterable[str], atomic: bool = False) -> Dict[str, bool]:
+        results = {}
+        if atomic:
+            with self.transaction() as tx:
+                for key in keys:
+                    tx.delete(key)
+                    results[key] = True
+            return results
+        for key in keys:
+            try:
+                self.delete(key)
+                results[key] = True
+            except Exception:
+                results[key] = False
+        return results
+
+    def exists_many(self, keys: Iterable[str]) -> Dict[str, bool]:
+        return {key: self.exists(key) for key in keys}
+
+    def compare_and_set(self, key: str, expected_etag: Optional[str], value: ValueInput,
+                        tags: List[str] = None, **kwargs) -> bool:
+        metadata = self._get_metadata(key)
+        current = metadata.get("checksum") if metadata else None
+        if current != expected_etag:
+            return False
+        self.set(key, value, tags=tags, **kwargs)
+        return True
+
+    def set_if_version(self, key: str, expected_etag: Optional[str], value: ValueInput,
+                       tags: List[str] = None, **kwargs) -> bool:
+        return self.compare_and_set(key, expected_etag, value, tags, **kwargs)
+
+    def set_if_absent(self, key: str, value: ValueInput, tags: List[str] = None, **kwargs) -> bool:
+        if self.exists(key):
+            return False
+        self.set(key, value, tags=tags, **kwargs)
+        return True
+
+    def set_if_exists(self, key: str, value: ValueInput, tags: List[str] = None, **kwargs) -> bool:
+        if not self.exists(key):
+            return False
+        self.set(key, value, tags=tags, **kwargs)
+        return True
+
+    def touch(self, key: str, ttl_seconds: Optional[int] = None) -> bool:
+        metadata = self._get_metadata(key)
+        if not metadata:
+            return False
+        if ttl_seconds:
+            metadata["ttl"] = ttl_seconds
+            metadata["expires_at"] = (datetime.now() + timedelta(seconds=ttl_seconds)).isoformat()
+        else:
+            metadata["last_accessed"] = datetime.now().isoformat()
+        self._set_metadata(metadata)
+        return True
+
+    def incr(self, key: str, amount: int = 1) -> int:
+        try:
+            raw = self.get_bytes(key)
+        except KeyError:
+            raw = b"0"
+        current = int(raw.decode(self.default_encoding))
+        new_value = current + amount
+        self.set_text(key, str(new_value), content_type="text/plain")
+        return new_value
+
+    def decr(self, key: str, amount: int = 1) -> int:
+        return self.incr(key, -amount)
 
     def delete(self, key: str) -> None:
         """Delete a key-value pair.
@@ -1214,12 +1924,12 @@ class KeyValueStore:
             ValueError: If key is empty or None
         """
         # Input validation
-        if not key or not isinstance(key, str):
-            raise ValueError("Key must be a non-empty string")
+        self._validate_key(key)
 
-        op_id = f"delete_{key}_{int(time.time() * 1000)}"
+        safe_key = self._safe_key(key)
+        op_id = f"delete_{safe_key}_{int(time.time() * 1000)}"
         if self.perf_logger:
-            self.perf_logger.start_operation(op_id, "delete", key=key)
+            self.perf_logger.start_operation(op_id, "delete", key_hash=safe_key)
         
         try:
             with self._get_lock(key):
@@ -1239,6 +1949,9 @@ class KeyValueStore:
                 # Remove from indexes
                 if self.index_manager:
                     self.index_manager.remove_key_from_indexes(key)
+                for field_indexes in self._custom_indexes.values():
+                    for keys in field_indexes.values():
+                        keys.discard(key)
 
                 # Delete the file if it exists using storage backend
                 path = metadata["path"]
@@ -1246,6 +1959,8 @@ class KeyValueStore:
 
                 # Delete metadata
                 self._delete_metadata(key)
+                self._emit_event("delete", key, metadata=metadata)
+                self._record_otel("delete", db=self.db, namespace=self.namespace)
             
             if self.perf_logger:
                 self.perf_logger.end_operation(op_id, success=True)
@@ -1253,7 +1968,7 @@ class KeyValueStore:
         except Exception as e:
             if self.perf_logger:
                 self.perf_logger.end_operation(op_id, success=False, error=str(e))
-            self.logger.error(f"Failed to delete key {key}: {e}")
+            self.logger.error(f"Failed to delete key hash {safe_key}: {e}")
             raise
             
     def _get_lock(self, key: str) -> threading.RLock:
@@ -1297,59 +2012,33 @@ class KeyValueStore:
         """Flush all buffered data to disk."""
         self._flush_to_disk()
         
-    def flushdb(self):
+    def flushdb(self, confirm: bool = False, scope: str = "namespace"):
         """Clear all data for this database."""
+        if confirm is not True:
+            self.logger.warning("flushdb called without confirm=True; this compatibility path will require confirmation in a future release")
+        if scope not in {"namespace", "db", "all"}:
+            raise ValueError("scope must be 'namespace', 'db', or 'all'")
         start_time = time.time()
         
         # Clear the buffer
-        self.buffer.clear()
-        self.current_buffer_size = 0
-        
-        if self.is_redis_backend:
-            # Redis backend has a different way to query and clean up
-            pattern = f"{self.storage.data_prefix}{self.db}/*"
-            meta_pattern = f"{self.storage.meta_prefix}{self.db}:{self.namespace}:*"
-            
-            # Delete all data keys
-            data_keys = self.storage.redis.keys(pattern)
-            if data_keys:
-                self.storage.redis.delete(*data_keys)
-                
-            # Delete all metadata keys
-            meta_keys = self.storage.redis.keys(meta_pattern)
-            if meta_keys:
-                self.storage.redis.delete(*meta_keys)
-                
-            # Also clean up tag references (more complex since they're shared)
-            tag_prefix = self.storage.tag_prefix
-            tag_keys = self.storage.redis.keys(f"{tag_prefix}*")
-            
-            # For each tag, remove references to this db:namespace
-            for tag_key in tag_keys:
-                # Find metadata keys for this db:namespace in tag set
-                members = self.storage.redis.smembers(tag_key)
-                for m in members:
-                    if m.decode('utf-8').startswith(f"{self.storage.meta_prefix}{self.db}:{self.namespace}:"):
-                        # Remove from tag set
-                        self.storage.redis.srem(tag_key, m)
-        else:
-            # Query for all entries in this db+namespace
-            entries = self.metadata.query_metadata({
-                "db": self.db,
-                "namespace": self.namespace
-            })
-            
-            # Delete all files
-            for entry in entries:
-                path = entry["path"]
-                self.storage.delete_file(path)
-                    
-            # Delete all metadata
-            for entry in entries:
-                self.metadata.delete_metadata(entry["key"], self.db, self.namespace)
+        with self.buffer_lock:
+            self.buffer.clear()
+            self.current_buffer_size = 0
+
+        query = {}
+        if scope in {"namespace", "db"}:
+            query["db"] = self.db
+        if scope == "namespace":
+            query["namespace"] = self.namespace
+        entries = self._query_metadata(query)
+
+        for entry in entries:
+            self.storage.delete_file(entry["path"])
+            self._delete_metadata(entry["key"])
             
         duration_ms = (time.time() - start_time) * 1000
         self.metrics.record_operation('flushdb', duration_ms)
+        self._emit_event("flushdb", None, scope=scope, count=len(entries))
         
     @property
     def name(self):
@@ -1367,19 +2056,12 @@ class KeyValueStore:
         """
         start_time = time.time()
         
-        if self.is_redis_backend:
-            query = {
-                "db": self.db,
-                "namespace": self.namespace,
-                "tags": tags
-            }
-            results = self.storage.query_metadata(query)
-        else:
-            results = self.metadata.query_metadata({
-                "db": self.db,
-                "namespace": self.namespace,
-                "tags": tags
-            })
+        self._validate_tags(tags)
+        results = self._query_metadata({
+            "db": self.db,
+            "namespace": self.namespace,
+            "tags": tags
+        })
         
         keys_metadata = {}
         for metadata in results:
@@ -1392,34 +2074,114 @@ class KeyValueStore:
         
     def list_all_tags(self):
         """List all tags in the database."""
-        # Implement based on backend type
-        if self.is_redis_backend:
-            # Use Redis tags listing
-            tag_prefix = f"{self.storage.tag_prefix}"
-            pattern = f"{tag_prefix}*"
-            
-            # Get all keys matching the tag pattern
-            tag_keys = self.storage.redis.keys(pattern)
-            
-            # Count items for each tag
-            tag_counts = {}
-            for tag_key in tag_keys:
-                # Extract tag name from key
-                tag_name = tag_key.decode('utf-8').replace(tag_prefix, "")
-                # Count members in the set
-                count = self.storage.redis.scard(tag_key)
-                tag_counts[tag_name] = count
-                
-            return tag_counts
-        else:
-            # Use SQLite implementation
-            return self.metadata.query_tags(self.db, self.namespace)
+        entries = self._query_metadata({"db": self.db, "namespace": self.namespace})
+        tag_counts = defaultdict(int)
+        for entry in entries:
+            for tag in entry.get("tags", []):
+                tag_counts[tag] += 1
+        return dict(tag_counts)
+
+    def scan_keys(self, prefix: Optional[str] = None, page_size: int = 100) -> Iterator[List[str]]:
+        """Yield pages of keys without requiring callers to load all pages at once."""
+        keys = self.keys_with_prefix(prefix or "")
+        for idx in range(0, len(keys), page_size):
+            yield keys[idx:idx + page_size]
+
+    def keys_with_prefix(self, prefix: str = "") -> List[str]:
+        entries = self._query_metadata({"db": self.db, "namespace": self.namespace})
+        return sorted(entry["key"] for entry in entries if entry["key"].startswith(prefix))
+
+    def list_namespaces(self, prefix: Optional[str] = None) -> List[str]:
+        entries = self._query_metadata({"db": self.db})
+        namespaces = sorted({entry["namespace"] for entry in entries})
+        if prefix:
+            namespaces = [namespace for namespace in namespaces if namespace.startswith(prefix)]
+        return namespaces
+
+    def clear_namespace(self, namespace: Optional[str] = None, confirm: bool = False) -> int:
+        if not confirm:
+            raise ValueError("clear_namespace requires confirm=True")
+        target_namespace = namespace or self.namespace
+        entries = self._query_metadata({"db": self.db, "namespace": target_namespace})
+        for entry in entries:
+            self.storage.delete_file(entry["path"])
+            if target_namespace == self.namespace:
+                self._delete_metadata(entry["key"])
+            elif self.capabilities.supports_metadata:
+                self.storage.delete_metadata(entry["key"], self.db, target_namespace)
+            else:
+                self.metadata.delete_metadata(entry["key"], self.db, target_namespace)
+        return len(entries)
+
+    def query_metadata(self, tags: Optional[List[str]] = None, prefix: Optional[str] = None,
+                       order_by: str = "key", reverse: bool = False,
+                       limit: Optional[int] = None, offset: int = 0, **filters) -> List[Dict[str, Any]]:
+        query = {"db": self.db, "namespace": self.namespace}
+        if tags:
+            query["tags"] = tags
+        entries = self._query_metadata(query)
+        if prefix:
+            entries = [entry for entry in entries if entry["key"].startswith(prefix)]
+        for field, value in filters.items():
+            entries = [entry for entry in entries if entry.get(field) == value]
+        entries.sort(key=lambda item: item.get(order_by) or "", reverse=reverse)
+        if offset:
+            entries = entries[offset:]
+        if limit is not None:
+            entries = entries[:limit]
+        return entries
+
+    def query(self) -> QueryBuilder:
+        return QueryBuilder(self)
+
+    def create_index(self, field: str):
+        self._indexed_fields.add(field)
+        self._rebuild_custom_index(field)
+
+    def query_index(self, field: str, value: Any) -> List[str]:
+        if field not in self._indexed_fields:
+            self.create_index(field)
+        return sorted(self._custom_indexes[field].get(value, set()))
+
+    def _extract_index_value(self, field: str, metadata: Dict[str, Any], value: Optional[bytes] = None):
+        if field in metadata:
+            return metadata.get(field)
+        if value is not None and metadata.get("content_type") == "application/json":
+            try:
+                document = json.loads(value.decode(metadata.get("encoding") or self.default_encoding))
+                return document.get(field)
+            except Exception:
+                return None
+        return None
+
+    def _rebuild_custom_index(self, field: str):
+        self._custom_indexes[field].clear()
+        for entry in self._query_metadata({"db": self.db, "namespace": self.namespace}):
+            value = None
+            if field not in entry and entry.get("content_type") == "application/json":
+                try:
+                    value = self.get_bytes(entry["key"])
+                except Exception:
+                    value = None
+            indexed_value = self._extract_index_value(field, entry, value)
+            if indexed_value is not None:
+                self._custom_indexes[field][indexed_value].add(entry["key"])
+
+    def _update_custom_indexes_for_key(self, key: str, metadata: Dict[str, Any], value: Optional[bytes] = None):
+        for field in self._indexed_fields:
+            for keys in self._custom_indexes[field].values():
+                keys.discard(key)
+            indexed_value = self._extract_index_value(field, metadata, value)
+            if indexed_value is not None:
+                self._custom_indexes[field][indexed_value].add(key)
         
     def cleanup_expired(self):
         """Clean up expired entries."""
-        if self.is_redis_backend:
+        if self.capabilities.supports_native_ttl:
             # Use Redis's native TTL handling plus custom cleanup
             expired = self.storage.cleanup_expired()
+            for item in expired:
+                self._emit_event("expire", item.get("key"), metadata=item)
             return expired
         else:
             # Original implementation but ensure files are deleted
@@ -1437,6 +2199,7 @@ class KeyValueStore:
                 # Delete the actual file
                 path = item["path"]
                 self.storage.delete_file(path)
+                self._emit_event("expire", key, metadata=item)
             
             return expired_items
         
@@ -1447,47 +2210,20 @@ class KeyValueStore:
         
         start_time = time.time()
         
-        if self.is_redis_backend:
-            # For Redis backend, implement a simplified version that just reports status
-            # since Redis handles storage efficiency internally
+        if self.capabilities.is_distributed:
+            entries = self._query_metadata({"db": self.db, "namespace": self.namespace})
             stats = {
-                'redis_compaction': 'No compaction needed for Redis backend',
-                'total_keys': 0,
-                'total_size_bytes': 0,
+                'remote_compaction': 'No local compaction needed for this backend',
+                'total_keys': len(entries),
+                'total_size_bytes': sum(e.get('stored_size') or e.get('size') or 0 for e in entries),
                 # For backward compatibility with tests
-                'files_processed': 0,
+                'files_processed': len(entries),
                 'files_compressed': 0,
                 'files_missing': 0,
-                'size_before_bytes': 0,
-                'size_after_bytes': 0,
+                'size_before_bytes': sum(e.get('stored_size') or e.get('size') or 0 for e in entries),
+                'size_after_bytes': sum(e.get('stored_size') or e.get('size') or 0 for e in entries),
                 'time_taken_ms': 0
             }
-            
-            # Count keys and size for statistics
-            pattern = f"{self.storage.data_prefix}{self.db}/*"
-            meta_pattern = f"{self.storage.meta_prefix}{self.db}:{self.namespace}:*"
-            
-            # Get counts
-            data_keys = self.storage.redis.keys(pattern)
-            meta_keys = self.storage.redis.keys(meta_pattern)
-            
-            stats['total_keys'] = len(data_keys)
-            stats['files_processed'] = len(data_keys)  # For backward compatibility
-            
-            # Calculate total size if desired (optional and potentially expensive)
-            total_size = 0
-            for key in data_keys[:100]:  # Limit to first 100 to avoid too much overhead
-                try:
-                    size = len(self.storage.redis.get(key) or b'')
-                    total_size += size
-                except:
-                    pass
-                    
-            stats['total_size_bytes'] = total_size
-            stats['size_before_bytes'] = total_size  # For backward compatibility
-            stats['size_after_bytes'] = total_size   # For backward compatibility
-            stats['size_estimation'] = 'Partial (first 100 keys)' if len(data_keys) > 100 else 'Complete'
-            
             return stats
         else:
             # Original implementation for non-Redis backends
@@ -1554,8 +2290,7 @@ class KeyValueStore:
                             
                             # Update metadata
                             entry["size"] = len(compressed_data)
-                            if not self.is_redis_backend:
-                                self.metadata.set_metadata(entry)
+                            self._set_metadata(entry)
                             
                             stats['compressed'] += 1
                             stats['files_compressed'] += 1  # For backward compatibility
@@ -1586,90 +2321,41 @@ class KeyValueStore:
         # Ensure we have up-to-date data
         self.flush()
         
-        if self.is_redis_backend:
-            # For Redis backend, implement a custom stats collection
-            stats = {
-                'db': self.db,
-                'namespace': self.namespace,
-                'count': 0,
-                'size_bytes': 0,
-                'tag_count': 0,
-                'performance': self.metrics.get_metrics()
-            }
-            
-            # Get data key pattern for this db
-            data_pattern = f"{self.storage.data_prefix}{self.db}/*"
-            meta_pattern = f"{self.storage.meta_prefix}{self.db}:{self.namespace}:*"
-            
-            # Count data keys
-            data_keys = self.storage.redis.keys(data_pattern)
-            meta_keys = self.storage.redis.keys(meta_pattern)
-            
-            stats['count'] = len(meta_keys)
-            
-            # Count unique tags
-            tag_prefix = f"{self.storage.tag_prefix}"
-            tag_keys = self.storage.redis.keys(f"{tag_prefix}*")
-            stats['tag_count'] = len(tag_keys)
-            
-            # Calculate total size (optional, could be expensive)
-            total_size = 0
-            sample_size = min(100, len(data_keys))  # Limit to 100 keys to avoid overhead
-            
-            if sample_size > 0:
-                sample_keys = data_keys[:sample_size]
-                for key in sample_keys:
-                    try:
-                        size = len(self.storage.redis.get(key) or b'')
-                        total_size += size
-                    except:
-                        pass
-                
-                # Extrapolate total size if we sampled
-                if sample_size < len(data_keys):
-                    stats['size_bytes'] = int(total_size * (len(data_keys) / sample_size))
-                    stats['size_note'] = f"Estimated from sample of {sample_size}/{len(data_keys)} keys"
-                else:
-                    stats['size_bytes'] = total_size
-                    stats['size_note'] = "Actual size"
-            
-            return stats
-        else:
-            # Original implementation for non-Redis backends
-            # Query all entries
-            entries = self.metadata.query_metadata({
-                "db": self.db,
-                "namespace": self.namespace
-            })
-            
-            # Calculate statistics
-            total_size = sum(entry.get("size", 0) for entry in entries)
-            
-            # Get unique tags
-            all_tags = set()
-            for entry in entries:
-                tags = entry.get("tags", [])
-                all_tags.update(tags)
-                
-            stats = {
-                'db': self.db,
-                'namespace': self.namespace,
-                'count': len(entries),
-                'size_bytes': total_size,
-                'tag_count': len(all_tags),
-                'performance': self.metrics.get_metrics()
-            }
-            
-            # Add advanced feature stats
-            if self.index_manager:
-                stats['index_stats'] = self.index_manager.get_index_stats()
-                stats['cache_stats'] = self.index_manager.get_cache_stats()
-                stats['query_stats'] = self.index_manager.get_query_stats()
-            
-            if self.transaction_manager:
-                stats['active_transactions'] = len(self.transaction_manager.get_active_transactions())
-            
-            return stats
+        entries = self._query_metadata({
+            "db": self.db,
+            "namespace": self.namespace
+        })
+
+        total_size = sum(entry.get("stored_size") or entry.get("size") or 0 for entry in entries)
+
+        all_tags = set()
+        for entry in entries:
+            tags = entry.get("tags", [])
+            all_tags.update(tags)
+
+        stats = {
+            'db': self.db,
+            'namespace': self.namespace,
+            'count': len(entries),
+            'size_bytes': total_size,
+            'logical_size_bytes': sum(entry.get("logical_size") or entry.get("size") or 0 for entry in entries),
+            'tag_count': len(all_tags),
+            'buffer_size_bytes': self.current_buffer_size,
+            'buffer_utilization_percent': 0 if self.buffer_size_mb <= 0 else (
+                self.current_buffer_size / (self.buffer_size_mb * 1024 * 1024)
+            ) * 100,
+            'performance': self.metrics.get_metrics()
+        }
+
+        if self.index_manager:
+            stats['index_stats'] = self.index_manager.get_index_stats()
+            stats['cache_stats'] = self.index_manager.get_cache_stats()
+            stats['query_stats'] = self.index_manager.get_query_stats()
+
+        if self.transaction_manager:
+            stats['active_transactions'] = len(self.transaction_manager.get_active_transactions())
+
+        return stats
     
     # Transaction Methods
     def transaction(self, isolation_level: str = "READ_COMMITTED"):
@@ -1800,20 +2486,116 @@ class KeyValueStore:
         """Clear all caches."""
         if self.index_manager:
             self.index_manager.clear_caches()
+
+    def open_reader(self, key: str) -> io.BytesIO:
+        """Open a binary reader for a stored value."""
+        return io.BytesIO(self.get_bytes(key))
+
+    def open_writer(self, key: str, tags: List[str] = None, chunk_size: Optional[int] = None) -> io.BytesIO:
+        """Open a binary writer that stores its contents when closed."""
+        return _StoreWriter(self, key, tags, chunk_size)
+
+    def set_chunked(self, key: str, value: ValueInput, chunk_size: int = 1024 * 1024,
+                    tags: List[str] = None):
+        """Store a large value as chunk records plus a manifest."""
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        data, value_metadata = self._normalize_value(value)
+        chunk_keys = []
+        for index in range(0, len(data), chunk_size):
+            chunk = data[index:index + chunk_size]
+            chunk_key = f"{key}.__chunk__.{index // chunk_size:08d}"
+            self.set_bytes(chunk_key, chunk, tags=(tags or []) + ["nadb:chunk"])
+            chunk_keys.append(chunk_key)
+        manifest = {
+            "chunked": True,
+            "key": key,
+            "chunk_size": chunk_size,
+            "chunks": chunk_keys,
+            "logical_size": len(data),
+            "checksum": self._checksum(data),
+            "value_metadata": value_metadata,
+        }
+        self.set_json(key, manifest, tags=(tags or []) + ["nadb:manifest"])
+
+    def get_chunked(self, key: str) -> bytes:
+        manifest = self.get_json(key)
+        if not manifest.get("chunked"):
+            raise ValueError(f"Key '{key}' is not a chunk manifest")
+        data = b"".join(self.get_bytes(chunk_key) for chunk_key in manifest["chunks"])
+        if self._checksum(data) != manifest["checksum"]:
+            raise ValueError(f"Checksum mismatch for chunked key '{key}'")
+        return data
+
+    def export_backup_stream(self, output_path: str, include_data: bool = True) -> str:
+        """Export a JSONL backup stream with a manifest header."""
+        self.flush()
+        entries = self._query_metadata({"db": self.db, "namespace": self.namespace})
+        manifest = {
+            "format": "nadb-jsonl",
+            "version": 1,
+            "db": self.db,
+            "namespace": self.namespace,
+            "created_at": datetime.now().isoformat(),
+            "count": len(entries),
+        }
+        with open(output_path, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"manifest": manifest}) + "\n")
+            for entry in entries:
+                item = {"metadata": entry}
+                if include_data:
+                    item["value"] = base64.b64encode(self.get_bytes(entry["key"])).decode("ascii")
+                f.write(json.dumps(item, default=str) + "\n")
+        return output_path
+
+    def import_backup_stream(self, input_path: str, clear_existing: bool = False) -> int:
+        """Import a JSONL backup stream created by export_backup_stream."""
+        if clear_existing:
+            self.flushdb(confirm=True)
+        restored = 0
+        with open(input_path, "r", encoding="utf-8") as f:
+            first = f.readline()
+            if not first:
+                return 0
+            for line in f:
+                item = json.loads(line)
+                metadata = item.get("metadata", {})
+                if "value" not in item:
+                    continue
+                value = base64.b64decode(item["value"])
+                self.set(metadata["key"], value, tags=metadata.get("tags"))
+                restored += 1
+                self._emit_event("restore", metadata["key"], metadata=metadata)
+        return restored
+
+    def export_backup_tar(self, output_path: str) -> str:
+        """Export a tar archive containing a JSONL backup stream."""
+        jsonl_path = output_path + ".jsonl"
+        self.export_backup_stream(jsonl_path)
+        with tarfile.open(output_path, "w") as tar:
+            tar.add(jsonl_path, arcname="backup.jsonl")
+        try:
+            os.remove(jsonl_path)
+        except OSError:
+            pass
+        return output_path
+
+    def prune_backups(self, keep_last: int = 10, keep_days: int = 30) -> int:
+        if not self.backup_manager:
+            raise RuntimeError("Backup not enabled for this store")
+        return self.backup_manager.cleanup_old_backups(keep_days=keep_days, keep_count=keep_last)
+
+    def get_otel_metrics(self) -> Dict[str, int]:
+        """Return lightweight operation counters used with optional OpenTelemetry."""
+        return dict(self._otel_counters)
     
     def get_all_keys(self) -> List[str]:
         """Get all keys from the store (for backup purposes)."""
         try:
-            if self.is_redis_backend:
-                results = self.storage.query_metadata({
-                    'db': self.db,
-                    'namespace': self.namespace
-                })
-            else:
-                results = self.metadata.query_metadata({
-                    'db': self.db,
-                    'namespace': self.namespace
-                })
+            results = self._query_metadata({
+                'db': self.db,
+                'namespace': self.namespace
+            })
             return [r['key'] for r in results]
         except Exception as e:
             self.logger.error(f"Failed to get all keys: {e}")
@@ -1821,6 +2603,8 @@ class KeyValueStore:
 
     def close(self):
         """Close the store and all resources."""
+        if self._owns_sync and self.sync:
+            self.sync.sync_exit()
         self.flush()
         
         # Close database connections
@@ -1836,6 +2620,11 @@ class KeyValueStore:
             self.transaction_manager.cleanup_stale_transactions(0)  # Clean all
         
         self.logger.info(f"KeyValueStore {self.db}.{self.namespace} closed")
+
+
+def open_store(*args, **kwargs) -> KeyValueStore:
+    """Convenience factory for opening a NADB store."""
+    return KeyValueStore.open(*args, **kwargs)
 
 
 if __name__ == '__main__':

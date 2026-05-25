@@ -305,7 +305,10 @@ class TransactionContext:
             # Store original tags and TTL from metadata
             metadata = result.get('metadata', {})
             operation.original_tags = metadata.get('tags', [])
-            operation.original_ttl = metadata.get('ttl')
+            try:
+                operation.original_ttl = self.kv_store.ttl(operation.key)
+            except Exception:
+                operation.original_ttl = metadata.get('ttl')
         except KeyError:
             operation.original_existed = False
             operation.original_tags = None

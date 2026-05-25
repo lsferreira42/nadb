@@ -12,10 +12,15 @@ import uuid
 from typing import Dict, List, Any, Optional
 import shutil
 
-# Importar Redis - sem tratamento de erro para falta de conexão
-r = redis.Redis(host='localhost', port=6379, db=0, socket_timeout=2.0)
-# Tentar executar um ping para testar a conexão - se falhar, o teste quebra
-r.ping()
+pytestmark = [pytest.mark.integration, pytest.mark.redis]
+
+try:
+    r = redis.Redis(host='localhost', port=6379, db=0, socket_timeout=2.0)
+    r.ping()
+except redis.RedisError as exc:
+    if os.getenv("NADB_REQUIRE_REDIS") == "1":
+        pytest.fail(f"Redis is required but unavailable: {exc}")
+    pytest.skip(f"Redis is unavailable: {exc}", allow_module_level=True)
 
 # Try to import from the installed package, fall back to direct import
 try:

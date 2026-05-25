@@ -104,6 +104,106 @@ def test_set_and_get_text(kv_store):
     kv_store.set('key1', text_data)
     assert kv_store.get('key1') == text_data
 
+def test_text_and_binary_helpers(kv_store):
+    kv_store.set_text("text_key", "Olá NADB", tags=["text"])
+    assert kv_store.get_text("text_key") == "Olá NADB"
+    assert kv_store.get("text_key") == "Olá NADB".encode("utf-8")
+
+    binary_value = bytearray([0, 1, 2, 255])
+    kv_store.set_bytes("binary_key", binary_value, tags=["binary"])
+    assert kv_store.get_bytes("binary_key") == bytes(binary_value)
+
+    kv_store.set_json("json_key", {"ok": True, "count": 2}, tags=["json"])
+    assert kv_store.get_json("json_key") == {"ok": True, "count": 2}
+
+    metadata = kv_store.get_with_metadata("text_key")["metadata"]
+    assert metadata["value_type"] == "text"
+    assert metadata["encoding"] == "utf-8"
+    assert metadata["content_type"].startswith("text/plain")
+    assert metadata["checksum"]
+
+def test_optional_reads_and_exists(kv_store):
+    assert kv_store.get_or_none("missing") is None
+    assert kv_store.get_or_default("missing", b"default") == b"default"
+    assert kv_store.exists("missing") is False
+    kv_store.set("present", "value")
+    assert kv_store.exists("present") is True
+
+def test_release_030_feature_api(tmp_path):
+    store = KeyValueStore(str(tmp_path), "features", 1, "org/project/dev", KeyValueSync(1),
+                          storage_backend="fs", return_type="stored", encryption_key="secret")
+    store.sync.start()
+    events = []
+    store.watch("*", lambda **event: events.append(event["event"]))
+    store.add_transformer(lambda key, value, meta: (value.upper(), {"transformed": True}) if key == "hooked" else value)
+    store.add_validator(lambda key, value, meta: (_ for _ in ()).throw(ValueError("blocked")) if key == "blocked" else None)
+
+    store.set_text("hooked", "abc", tags=["feature"])
+    stored = store.get("hooked")
+    assert stored.text == "ABC"
+    assert stored.metadata["encrypted"] is True
+    assert "set" in events
+
+    with pytest.raises(ValueError):
+        store.set_text("blocked", "no")
+
+    store.set_many({"a": "1", "b": "2"})
+    assert {key: value.bytes for key, value in store.get_many(["a", "b"]).items()} == {"a": b"1", "b": b"2"}
+    assert store.exists_many(["a", "missing"]) == {"a": True, "missing": False}
+
+    etag = store.get_with_metadata("a")["metadata"]["checksum"]
+    assert store.compare_and_set("a", etag, "3") is True
+    assert store.compare_and_set("a", "wrong", "4") is False
+    assert store.set_if_absent("a", "x") is False
+    assert store.set_if_exists("a", "4") is True
+    assert store.incr("counter") == 1
+    assert store.decr("counter") == 0
+
+    expires_at = datetime.now() + timedelta(seconds=30)
+    store.set_with_expires_at("expires", "soon", expires_at)
+    assert store.ttl("expires") > 0
+    assert store.persist_ttl("expires") is True
+    assert store.ttl("expires") is None
+
+    assert "a" in store.keys_with_prefix("a")
+    assert any("a" in page for page in store.scan_keys(page_size=2))
+    assert "org/project/dev" in store.list_namespaces("org")
+
+    store.set_json("user:1", {"status": "active", "user_id": 1})
+    store.create_index("status")
+    assert store.query_index("status", "active") == ["user:1"]
+    assert "user:1" in store.query().where("content_type", "application/json").keys()
+
+    with store.open_writer("streamed") as writer:
+        writer.write(b"stream-data")
+    assert store.open_reader("streamed").read() == b"stream-data"
+
+    store.set_chunked("large-chunked", b"abcdef", chunk_size=2)
+    assert store.get_chunked("large-chunked") == b"abcdef"
+
+    export_path = os.path.join(str(tmp_path), "backup.jsonl")
+    store.export_backup_stream(export_path)
+    assert os.path.exists(export_path)
+    before = len(store.get_all_keys())
+    assert store.import_backup_stream(export_path) >= before
+    assert store.get_otel_metrics()["set"] >= 1
+    store.sync.sync_exit()
+    store.close()
+
+def test_memory_and_sqlite_backends(tmp_path):
+    sync = KeyValueSync(1)
+    sync.start()
+    try:
+        memory_store = KeyValueStore(str(tmp_path), "mem", 1, "ns", sync, storage_backend="memory")
+        memory_store.set_text("k", "v")
+        assert memory_store.get_text("k") == "v"
+
+        sqlite_store = KeyValueStore(str(tmp_path), "sqldb", 1, "ns", sync, storage_backend="sqlite")
+        sqlite_store.set_json("doc", {"status": "ok"})
+        assert sqlite_store.get_json("doc") == {"status": "ok"}
+    finally:
+        sync.sync_exit()
+
 def test_delete(kv_store):
     kv_store.set('key1', b'value1')
     kv_store.delete('key1')

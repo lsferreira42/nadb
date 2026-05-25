@@ -1,6 +1,6 @@
 # NADB Blog Engine
 
-A simple but powerful blog engine built with NADB (Not A Database) using Redis as the backend storage. This example demonstrates how to build a complete web application using NADB's advanced features.
+A simple but powerful blog engine built with NADB (Not A Database), using either filesystem or Redis storage. This example demonstrates how to build a complete web application using NADB's advanced features.
 
 ## Features
 
@@ -10,7 +10,7 @@ A simple but powerful blog engine built with NADB (Not A Database) using Redis a
 - 📊 **Admin Panel** - Manage all posts from a single interface
 - 💾 **Backup System** - Create backups of your blog data
 - 📱 **Responsive Design** - Works on desktop and mobile devices
-- ⚡ **Fast Performance** - Powered by Redis and NADB's intelligent caching
+- ⚡ **Fast Performance** - Powered by NADB's filesystem or Redis backends and intelligent caching
 - 🔄 **ACID Transactions** - Data consistency for all operations
 - 📈 **Statistics** - View blog and system statistics
 
@@ -20,7 +20,7 @@ This blog engine showcases NADB's capabilities:
 
 ```
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Flask Web     │    │      NADB       │    │      Redis      │
+│   Flask Web     │    │      NADB       │    │   FS / Redis    │
 │   Application   │◄──►│   Key-Value     │◄──►│    Backend      │
 │                 │    │     Store       │    │                 │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
@@ -39,18 +39,32 @@ This blog engine showcases NADB's capabilities:
 ## Requirements
 
 - Python 3.7+
-- Redis server running on localhost:6379
 - Flask
-- NADB with Redis support
+- NADB, with `nadb[redis]` only when using Redis
 
 ## Installation
 
 1. **Install dependencies:**
    ```bash
-   pip install Flask nadb[redis]
+   pip install Flask nadb
+
+   # Optional, only for Redis mode
+   pip install "nadb[redis]"
    ```
 
-2. **Start Redis server:**
+2. **Choose the storage backend:**
+   ```bash
+   # Default: filesystem storage in ./blog_data
+   export NADB_STORAGE_ENGINE=fs
+
+   # Redis mode
+   export NADB_STORAGE_ENGINE=redis
+   export REDIS_HOST=localhost
+   export REDIS_PORT=6379
+   export REDIS_DB=0
+   ```
+
+3. **Start Redis server when using Redis mode:**
    ```bash
    # macOS (with Homebrew)
    brew install redis
@@ -64,12 +78,12 @@ This blog engine showcases NADB's capabilities:
    docker run -d -p 6379:6379 redis:alpine
    ```
 
-3. **Run the blog:**
+4. **Run the blog:**
    ```bash
    python blog.py
    ```
 
-4. **Open your browser:**
+5. **Open your browser:**
    - Blog: http://localhost:5000
    - Admin: http://localhost:5000/admin
    - Create Post: http://localhost:5000/create
@@ -135,12 +149,10 @@ The blog uses NADB's key-value storage with the following structure:
 ### 1. **Basic Operations**
 ```python
 # Store a blog post
-post_data = json.dumps(post.to_dict()).encode('utf-8')
-kv_store.set(f"post:{post.id}", post_data, tags=["blog_post", "published"])
+kv_store.set_json(f"post:{post.id}", post.to_dict(), tags=["blog_post", "published"])
 
 # Retrieve a post
-data = kv_store.get(f"post:{post_id}")
-post = json.loads(data.decode('utf-8'))
+post = kv_store.get_json(f"post:{post_id}")
 
 # Delete a post
 kv_store.delete(f"post:{post_id}")
@@ -159,8 +171,8 @@ tagged_posts = kv_store.query_by_tags(["blog_post", f"tag:{tag_name}"])
 ```python
 # Transactions for data consistency
 with kv_store.transaction() as tx:
-    tx.set("post:1", post_data, tags)
-    tx.set("index:latest", latest_post_id)
+    tx.set("post:1", json.dumps(post.to_dict()).encode("utf-8"), tags)
+    tx.set("index:latest", latest_post_id.encode("utf-8"))
 
 # Create backups
 backup = kv_store.create_backup("blog_backup", compression=True)
@@ -185,6 +197,7 @@ print(f"Average query time: {stats['query_stats']['tags_and']['avg_time_ms']}ms"
 
 ### Environment Variables
 
+- `NADB_STORAGE_ENGINE` - `fs` or `redis` (default: `fs`)
 - `REDIS_HOST` - Redis server host (default: localhost)
 - `REDIS_PORT` - Redis server port (default: 6379)
 - `REDIS_DB` - Redis database number (default: 0)
@@ -196,7 +209,7 @@ The blog is configured with:
 - **Database**: `blog_engine`
 - **Namespace**: `posts`
 - **Buffer Size**: 2MB
-- **Storage Backend**: Redis
+- **Storage Backend**: `fs` by default, or Redis with `NADB_STORAGE_ENGINE=redis`
 - **Advanced Features**: All enabled (transactions, backup, indexing)
 - **Cache Size**: 1000 queries
 
@@ -226,7 +239,7 @@ This example can be extended with:
 def save_comment(post_id, comment_data):
     comment_key = f"comment:{post_id}:{comment_data['id']}"
     tags = ["comment", f"post:{post_id}", f"author:{comment_data['author']}"]
-    kv_store.set(comment_key, json.dumps(comment_data).encode(), tags)
+    kv_store.set_json(comment_key, comment_data, tags=tags)
 
 def get_post_comments(post_id):
     results = kv_store.query_by_tags(["comment", f"post:{post_id}"])
@@ -242,8 +255,10 @@ def create_session(user_id):
     # Use TTL for automatic session expiration
     kv_store.set_with_ttl(
         f"session:{session_id}",
-        json.dumps(session_data).encode(),
+        json.dumps(session_data),
         ttl_seconds=3600,  # 1 hour
+        content_type="application/json",
+        value_type="json",
         tags=["session", f"user:{user_id}"]
     )
     return session_id
@@ -254,7 +269,7 @@ def create_session(user_id):
 This blog engine leverages NADB's performance features:
 
 - **Intelligent Caching**: Frequently accessed posts are cached in memory
-- **Connection Pooling**: Redis connections are pooled for high concurrency
+- **Connection Pooling**: Redis connections are pooled for high concurrency in Redis mode
 - **Query Optimization**: Tag queries use optimized indexes
 - **Compression**: Large posts are automatically compressed
 - **Buffering**: Write operations are optimized with intelligent buffering

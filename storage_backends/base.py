@@ -12,6 +12,10 @@ import zlib
 # Constants for compression
 COMPRESS_MIN_SIZE = 1024  # Only compress files larger than 1KB
 COMPRESS_LEVEL = 6  # Medium compression (range is 0-9)
+ENVELOPE_MAGIC = b'NADB\x01'
+ENVELOPE_FLAG_COMPRESSED = 0x01
+ENVELOPE_ALGORITHM_ZLIB = 0x01
+LEGACY_COMPRESS_PREFIX = b'CMP:'
 
 
 @dataclass
@@ -190,7 +194,7 @@ class StorageBackend(ABC):
             return data
 
         compressed = zlib.compress(data, COMPRESS_LEVEL)
-        return b'CMP:' + compressed
+        return ENVELOPE_MAGIC + bytes([ENVELOPE_FLAG_COMPRESSED, ENVELOPE_ALGORITHM_ZLIB]) + compressed
 
     def decompress_data(self, data: bytes) -> bytes:
         """
@@ -205,12 +209,31 @@ class StorageBackend(ABC):
         if not data or not self._is_compressed(data):
             return data
 
-        compressed_data = data[4:]
-        return zlib.decompress(compressed_data)
+        try:
+            if data.startswith(LEGACY_COMPRESS_PREFIX):
+                compressed_data = data[len(LEGACY_COMPRESS_PREFIX):]
+            else:
+                flags = data[len(ENVELOPE_MAGIC)]
+                algorithm = data[len(ENVELOPE_MAGIC) + 1]
+                if not flags & ENVELOPE_FLAG_COMPRESSED:
+                    return data
+                if algorithm != ENVELOPE_ALGORITHM_ZLIB:
+                    raise ValueError(f"Unsupported NADB compression algorithm: {algorithm}")
+                compressed_data = data[len(ENVELOPE_MAGIC) + 2:]
+            return zlib.decompress(compressed_data)
+        except zlib.error as exc:
+            raise ValueError("Stored value is marked as compressed but could not be decompressed") from exc
 
     def _is_compressed(self, data: bytes) -> bool:
         """Check if data has the compression header."""
-        return data and data.startswith(b'CMP:')
+        return bool(data) and (
+            data.startswith(LEGACY_COMPRESS_PREFIX) or
+            (
+                data.startswith(ENVELOPE_MAGIC) and
+                len(data) >= len(ENVELOPE_MAGIC) + 2 and
+                bool(data[len(ENVELOPE_MAGIC)] & ENVELOPE_FLAG_COMPRESSED)
+            )
+        )
 
     def close_connections(self) -> None:
         """

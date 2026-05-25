@@ -7,12 +7,19 @@ import uuid
 import shutil
 from datetime import datetime, timedelta
 
-# Importar Redis - sem tratamento de erro para falta de conexão
+# Importar Redis. Por padrao, estes testes sao pulados sem Redis local; em CI
+# de integracao use NADB_REQUIRE_REDIS=1 para falhar se o servico estiver ausente.
 import redis
-# Conectar diretamente ao Redis, deixará falhar se não estiver disponível
-r = redis.Redis(host='localhost', port=6379, db=0, socket_timeout=2.0)
-# Tenta executar um ping para testar a conexão - se falhar, o teste quebra
-r.ping()
+
+pytestmark = [pytest.mark.integration, pytest.mark.redis]
+
+try:
+    r = redis.Redis(host='localhost', port=6379, db=0, socket_timeout=2.0)
+    r.ping()
+except redis.RedisError as exc:
+    if os.getenv("NADB_REQUIRE_REDIS") == "1":
+        pytest.fail(f"Redis is required but unavailable: {exc}")
+    pytest.skip(f"Redis is unavailable: {exc}", allow_module_level=True)
 
 # Importar implementações dos backends
 from storage_backends.fs import FileSystemStorage

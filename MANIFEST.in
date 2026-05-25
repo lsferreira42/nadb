@@ -4,7 +4,18 @@ include pyproject.toml
 include Makefile
 include sql/*.sql
 include nakv.py
-include nakv_tests.py
+include _version.py
+include transaction.py
+include backup_manager.py
+include index_manager.py
+include logging_config.py
+include nadb_cli.py
+recursive-include docs *.md
+recursive-include examples *.py *.md *.css *.js *.html *.txt Dockerfile docker-compose.yml
+recursive-include storage_backends *.py
+recursive-include nadb *.py
+include nakv_tests_*.py
+include test_advanced_features.py
 exclude .gitignore
 exclude .vscode/
 exclude __pycache__/

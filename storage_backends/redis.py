@@ -37,7 +37,8 @@ class RedisStorage(StorageBackend):
                  socket_timeout=DEFAULT_SOCKET_TIMEOUT,
                  connection_timeout=DEFAULT_CONNECTION_TIMEOUT,
                  max_connections=DEFAULT_POOL_SIZE,
-                 connection_pool_timeout=DEFAULT_POOL_TIMEOUT, **kwargs):
+                 connection_pool_timeout=DEFAULT_POOL_TIMEOUT,
+                 key_prefix="nadb", **kwargs):
         """
         Initialize Redis storage backend with connection pooling.
         
@@ -81,11 +82,14 @@ class RedisStorage(StorageBackend):
         # Connect to Redis with pool
         self._connect()
         
-        # Key prefixes for different types of data
-        self.data_prefix = "nadb:data:"
-        self.meta_prefix = "nadb:meta:"
-        self.tag_prefix = "nadb:tag:"
-        self.ttl_set = "nadb:ttl"
+        # Key prefixes for different types of data. A configurable prefix keeps
+        # multiple applications from colliding in the same Redis database.
+        clean_prefix = str(key_prefix).strip(":") or "nadb"
+        self.key_prefix = clean_prefix
+        self.data_prefix = f"{clean_prefix}:data:"
+        self.meta_prefix = f"{clean_prefix}:meta:"
+        self.tag_prefix = f"{clean_prefix}:tag:"
+        self.ttl_set = f"{clean_prefix}:ttl"
         
         self.logger.info(f"Redis storage initialized with pool: {host}:{port} DB:{db} (max_connections={max_connections})")
 
@@ -295,43 +299,6 @@ class RedisStorage(StorageBackend):
             with self.redis.pipeline() as pipe:
                 # Store the data
                 pipe.set(key, data)
-                
-                # Get metadata for this key to set TTL if needed
-                # Extract the original key, db, and namespace from the path
-                parts = relative_path.split('/')
-                if len(parts) >= 4:
-                    db = parts[0]
-                    try:
-                        # Try to find metadata with this path
-                        for pattern in [f"nadb:meta:{db}:*:*"]:
-                            meta_keys = self._execute_with_retry(
-                                "get_meta_keys", 
-                                lambda: self.redis.keys(pattern)
-                            )
-                            
-                            for meta_key in meta_keys:
-                                meta_data = self._execute_with_retry(
-                                    "get_meta", 
-                                    lambda: self.redis.hgetall(meta_key)
-                                )
-                                
-                                # Check if this metadata entry has this path
-                                path_key = b'path'
-                                if path_key in meta_data:
-                                    stored_path = json.loads(meta_data[path_key].decode('utf-8'))
-                                    if stored_path == relative_path:
-                                        # Found matching metadata, check for TTL
-                                        ttl_key = b'ttl'
-                                        if ttl_key in meta_data:
-                                            ttl = json.loads(meta_data[ttl_key].decode('utf-8'))
-                                            if ttl is not None and ttl > 0:
-                                                # Add TTL to the pipeline
-                                                pipe.expire(key, ttl)
-                                                break
-                    except Exception as e:
-                        self.logger.error(f"Error setting TTL on data key: {str(e)}")
-                
-                # Execute the pipeline
                 results = pipe.execute()
                 return all(results)
                 
@@ -427,7 +394,7 @@ class RedisStorage(StorageBackend):
         try:
             # Match all keys that begin with the given prefix
             prefix = self._get_data_key(relative_path)
-            keys = self.redis.keys(f"{prefix}*")
+            keys = self._scan_keys(f"{prefix}*")
             if keys:
                 return self.redis.delete(*keys)
             return 0
@@ -446,12 +413,7 @@ class RedisStorage(StorageBackend):
         Returns:
             Compressed data with header or original data if not compressed
         """
-        if not compression_enabled or not self._should_compress(data):
-            return data
-            
-        # Add a simple header to indicate compression
-        compressed = zlib.compress(data, COMPRESS_LEVEL)
-        return b'CMP:' + compressed
+        return super().compress_data(data, compression_enabled)
     
     def decompress_data(self, data):
         """
@@ -463,12 +425,7 @@ class RedisStorage(StorageBackend):
         Returns:
             Decompressed data
         """
-        if not data or not self._is_compressed(data):
-            return data
-            
-        # Skip the compression header
-        compressed_data = data[4:]
-        return zlib.decompress(compressed_data)
+        return super().decompress_data(data)
     
     def _is_compressed(self, data):
         """
@@ -480,7 +437,7 @@ class RedisStorage(StorageBackend):
         Returns:
             True if data is compressed, False otherwise
         """
-        return data and data.startswith(b'CMP:')
+        return super()._is_compressed(data)
 
     def _should_compress(self, data):
         """
@@ -553,10 +510,21 @@ class RedisStorage(StorageBackend):
             
             # Convert datetime objects to strings
             meta_copy = metadata.copy()
-            meta_copy["created_at"] = datetime.now().isoformat()
+            existing = self.redis.hgetall(meta_key)
+            if existing and b'created_at' in existing:
+                meta_copy["created_at"] = json.loads(existing[b'created_at'].decode('utf-8'))
+            else:
+                meta_copy["created_at"] = datetime.now().isoformat()
+            meta_copy["last_updated"] = datetime.now().isoformat()
             
             # Handle tags separately
             tags = meta_copy.pop("tags", [])
+            old_tags = []
+            if existing and b'tags' in existing:
+                try:
+                    old_tags = json.loads(existing[b'tags'].decode('utf-8'))
+                except json.JSONDecodeError:
+                    old_tags = []
             
             # Get the data key
             path = meta_copy.get("path")
@@ -569,6 +537,9 @@ class RedisStorage(StorageBackend):
             self.redis.hset(meta_key, mapping=serialized_meta)
             
             # Store tags if present
+            for tag in old_tags:
+                if tag not in tags:
+                    self.redis.srem(f"{self.tag_prefix}{tag}", meta_key)
             if tags:
                 self._set_tags(meta_key, tags)
             
@@ -810,7 +781,7 @@ class RedisStorage(StorageBackend):
                     continue
                 
                 # Date filters
-                created = meta.get("created")
+                created = meta.get("created_at") or meta.get("created")
                 if created_after and created and created < created_after:
                     continue
                 
@@ -893,12 +864,9 @@ class RedisStorage(StorageBackend):
                 
                 # Extract metadata info
                 try:
-                    # Format: nadb:meta:db:namespace:key
-                    parts = meta_key_str.split(':')
-                    if len(parts) >= 5:
-                        db = parts[2]
-                        namespace = parts[3]
-                        key = ':'.join(parts[4:])  # Handle keys with colons
+                    if meta_key_str.startswith(self.meta_prefix):
+                        remainder = meta_key_str[len(self.meta_prefix):]
+                        db, namespace, key = remainder.split(':', 2)
                         
                         # Get metadata if available to extract path
                         path = None

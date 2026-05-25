@@ -21,7 +21,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install app package with Redis support
+# Install app package with Redis support for NADB_STORAGE_ENGINE=redis
 RUN pip install "nadb[redis]" gunicorn
 
 # Copy application code

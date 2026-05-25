@@ -1,9 +1,17 @@
 from setuptools import setup, find_packages
 import os
 
+
+def read_version():
+    version_file = os.path.join(os.path.dirname(__file__), "_version.py")
+    with open(version_file, "r", encoding="utf-8") as f:
+        namespace = {}
+        exec(f.read(), namespace)
+    return namespace["__version__"]
+
 # Include SQL files
 package_data = {
-    'nadb': ['sql/*.sql'],
+    'sql': ['*.sql'],
 }
 
 # Read the long description from README.md
@@ -12,16 +20,18 @@ with open('README.md', 'r', encoding='utf-8') as f:
 
 setup(
     # Using explicit module name instead of package directory
-    py_modules=['nakv'],  # Main module is nakv.py
+    py_modules=['nakv', '_version', 'transaction', 'backup_manager', 'index_manager', 'logging_config', 'nadb_cli'],
     
     # Create an alias so import nadb works
-    packages=['nadb', 'storage_backends'],
+    packages=['nadb', 'storage_backends', 'sql'],
     
     name='nadb',
-    version='0.1.6',
+    version=read_version(),
     install_requires=[],
     extras_require={
         'redis': ['redis>=3.5.0'],  # Optional Redis dependency
+        's3': ['boto3>=1.20.0'],
+        'otel': ['opentelemetry-api>=1.20.0'],
         'dev': ['pytest>=6.0.0', 'pytest-cov>=2.10.0'],
     },
     author='Leandro Ferreira',
@@ -51,5 +61,9 @@ setup(
     ],
     python_requires='>=3.7',
     keywords='database, key-value, nosql, storage, memory, disk, persistence, tagging, redis',
+    entry_points={
+        'console_scripts': [
+            'nadb=nadb_cli:main',
+        ],
+    },
 )
-

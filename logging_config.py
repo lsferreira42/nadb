@@ -9,6 +9,18 @@ import os
 from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 import threading
+import hashlib
+
+
+SENSITIVE_FIELD_NAMES = {"key", "password", "secret", "token", "value", "data"}
+
+
+def _redact_field(name: str, value: Any) -> Any:
+    """Redact sensitive structured-log fields while keeping them debuggable."""
+    if name in SENSITIVE_FIELD_NAMES:
+        digest = hashlib.blake2b(str(value).encode("utf-8"), digest_size=8).hexdigest()
+        return f"<redacted:{digest}>"
+    return value
 
 
 class StructuredFormatter(logging.Formatter):
@@ -52,7 +64,7 @@ class StructuredFormatter(logging.Formatter):
                           'msecs', 'relativeCreated', 'thread', 'threadName', 
                           'processName', 'process', 'getMessage', 'exc_info', 'exc_text', 'stack_info']:
                 if not key.startswith('_'):
-                    log_entry[key] = value
+                    log_entry[key] = _redact_field(key, value)
         
         return json.dumps(log_entry, default=str)
 
@@ -88,8 +100,8 @@ class PerformanceLogger:
                 'operation': start_info['operation_type'],
                 'duration_ms': round(duration_ms, 2),
                 'success': success,
-                **start_info['metadata'],
-                **kwargs
+                **{k: _redact_field(k, v) for k, v in start_info['metadata'].items()},
+                **{k: _redact_field(k, v) for k, v in kwargs.items()}
             }
             
             level = logging.INFO if success else logging.ERROR

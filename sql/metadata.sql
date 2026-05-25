@@ -8,7 +8,15 @@ CREATE TABLE metadata (
     last_updated DATETIME DEFAULT NULL,
     last_accessed DATETIME DEFAULT NULL,
     size INTEGER DEFAULT NULL,
+    logical_size INTEGER DEFAULT NULL,
+    stored_size INTEGER DEFAULT NULL,
+    value_type TEXT DEFAULT 'bytes',
+    encoding TEXT DEFAULT NULL,
+    content_type TEXT DEFAULT NULL,
+    checksum TEXT DEFAULT NULL,
+    encrypted INTEGER DEFAULT 0,
     ttl INTEGER DEFAULT NULL,
+    expires_at DATETIME DEFAULT NULL,
     UNIQUE (path, key, db, namespace)
 );
 
@@ -27,4 +35,3 @@ CREATE TABLE metadata_tags (
     FOREIGN KEY (metadata_id) REFERENCES metadata(id) ON DELETE CASCADE,
     FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
 );
-

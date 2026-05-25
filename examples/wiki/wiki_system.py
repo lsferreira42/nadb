@@ -2,15 +2,15 @@
 """
 Sistema de Wiki Completo usando NADB
 Demonstra: versionamento, estatísticas, busca, colaboração
+Use NADB_STORAGE_ENGINE=fs ou NADB_STORAGE_ENGINE=redis para alternar storage.
 """
 
 from flask import Flask, render_template, request, jsonify, redirect, url_for, session
-import json
 import uuid
 import atexit
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
-from collections import defaultdict, Counter
+from collections import Counter
 import markdown
 from markupsafe import Markup
 import os
@@ -32,34 +32,44 @@ kv_sync = KeyValueSync(flush_interval_seconds=5)
 kv_sync.start()
 
 # Get Redis configuration from environment variables
+storage_engine = os.environ.get('NADB_STORAGE_ENGINE', 'fs').strip().lower()
+if storage_engine not in {'fs', 'redis'}:
+    raise ValueError("NADB_STORAGE_ENGINE must be 'fs' or 'redis'")
+
 redis_host = os.environ.get('REDIS_HOST', 'localhost')
 redis_port = int(os.environ.get('REDIS_PORT', 6379))
 redis_db = int(os.environ.get('REDIS_DB', 3))  # DB separado para wiki
+redis_password = os.environ.get('REDIS_PASSWORD')
+storage_options = None
+if storage_engine == 'redis':
+    storage_options = {
+        "host": redis_host,
+        "port": redis_port,
+        "db": redis_db,
+        "password": redis_password,
+    }
 
-# Initialize KeyValueStore with Redis backend
+# Initialize KeyValueStore with the selected backend
 kv_store = KeyValueStore(
     data_folder_path='./wiki_data',
     db='wiki_system',
     buffer_size_mb=2,
     namespace='pages',
     sync=kv_sync,
-    storage_backend="redis"
+    storage_backend=storage_engine,
+    storage_options=storage_options,
+    enable_transactions=True,
+    enable_backup=True,
+    enable_indexing=True,
+    cache_size=1000,
 )
-
-# Configure Redis connection if needed
-if redis_host != 'localhost' or redis_port != 6379 or redis_db != 3:
-    from storage_backends.redis import RedisStorage
-    custom_redis_storage = RedisStorage(
-        base_path='./wiki_data',
-        host=redis_host,
-        port=redis_port,
-        db=redis_db
-    )
-    kv_store.storage = custom_redis_storage
 
 # Ensure NADB sync stops gracefully on exit
 atexit.register(kv_sync.sync_exit)
-print(f"NADB Wiki System initialized with Redis at {redis_host}:{redis_port} (DB: {redis_db})")
+if storage_engine == 'redis':
+    print(f"NADB Wiki System initialized with Redis at {redis_host}:{redis_port} (DB: {redis_db})")
+else:
+    print("NADB Wiki System initialized with filesystem storage at ./wiki_data")
 
 # Configurar Markdown
 md = markdown.Markdown(extensions=['codehilite', 'fenced_code', 'tables', 'toc'])
@@ -72,6 +82,14 @@ def markdown_filter(text):
 class WikiSystem:
     def __init__(self, kv_store):
         self.kv = kv_store
+
+    def _load_json(self, key):
+        """Read a JSON document through NADB's typed JSON helper."""
+        return self.kv.get_json(key)
+
+    def _save_json(self, key, value, tags):
+        """Write a JSON document through NADB's typed JSON helper."""
+        return self.kv.set_json(key, value, tags=tags, ensure_ascii=False)
     
     def get_page_key(self, slug):
         """Generate NADB key for a wiki page."""
@@ -127,15 +145,14 @@ class WikiSystem:
                 old_tags.extend([f'tag:{tag}' for tag in current_page.get('tags', [])])
                 
                 version_key = self.get_version_key(slug, current_page['version'])
-                self.kv.set(version_key, json.dumps(current_page).encode('utf-8'), tags=old_tags)
+                self._save_json(version_key, current_page, tags=old_tags)
             
             # Save new version as current
             current_key = self.get_page_key(slug)
             version_key = self.get_version_key(slug, version)
             
-            page_json = json.dumps(page_data).encode('utf-8')
-            self.kv.set(current_key, page_json, tags=nadb_tags)
-            self.kv.set(version_key, page_json, tags=nadb_tags)
+            self._save_json(current_key, page_data, tags=nadb_tags)
+            self._save_json(version_key, page_data, tags=nadb_tags)
             
             # Update statistics
             self._update_stats('pages_created')
@@ -151,8 +168,7 @@ class WikiSystem:
         """Obter página atual por slug"""
         try:
             key = self.get_page_key(slug)
-            page_data = self.kv.get(key)
-            return json.loads(page_data.decode('utf-8'))
+            return self._load_json(key)
         except KeyError:
             return None
         except Exception as e:
@@ -163,8 +179,7 @@ class WikiSystem:
         """Obter versão específica de uma página"""
         try:
             key = self.get_version_key(slug, version)
-            page_data = self.kv.get(key)
-            return json.loads(page_data.decode('utf-8'))
+            return self._load_json(key)
         except KeyError:
             return None
         except Exception as e:
@@ -181,8 +196,7 @@ class WikiSystem:
             for key, metadata in results.items():
                 if ':v' in key:  # Only version keys
                     try:
-                        page_data = self.kv.get(key)
-                        page_dict = json.loads(page_data.decode('utf-8'))
+                        page_dict = self._load_json(key)
                         versions.append(page_dict)
                     except Exception as e:
                         print(f"Error loading version {key}: {e}")
@@ -212,8 +226,7 @@ class WikiSystem:
             try:
                 # Update current page with new view count
                 key = self.get_page_key(slug)
-                page_json = json.dumps(page).encode('utf-8')
-                self.kv.set(key, page_json, tags=nadb_tags)
+                self._save_json(key, page, tags=nadb_tags)
                 
                 # Update global statistics
                 self._update_stats('total_views')
@@ -236,8 +249,7 @@ class WikiSystem:
             
             for key, metadata in results.items():
                 try:
-                    page_data = self.kv.get(key)
-                    page_dict = json.loads(page_data.decode('utf-8'))
+                    page_dict = self._load_json(key)
                     
                     # Busca textual simples
                     if query:
@@ -277,8 +289,7 @@ class WikiSystem:
             
             for key, metadata in results.items():
                 try:
-                    page_data = self.kv.get(key)
-                    page_dict = json.loads(page_data.decode('utf-8'))
+                    page_dict = self._load_json(key)
                     pages.append(page_dict)
                 except Exception as e:
                     print(f"Error loading popular page {key}: {e}")
@@ -298,8 +309,7 @@ class WikiSystem:
             
             for key, metadata in results.items():
                 try:
-                    page_data = self.kv.get(key)
-                    page_dict = json.loads(page_data.decode('utf-8'))
+                    page_dict = self._load_json(key)
                     pages.append(page_dict)
                 except Exception as e:
                     print(f"Error loading recent page {key}: {e}")
@@ -319,8 +329,7 @@ class WikiSystem:
             
             for key, metadata in results.items():
                 try:
-                    page_data = self.kv.get(key)
-                    page_dict = json.loads(page_data.decode('utf-8'))
+                    page_dict = self._load_json(key)
                     all_tags.extend(page_dict.get('tags', []))
                 except Exception as e:
                     print(f"Error loading tags from {key}: {e}")
@@ -336,8 +345,7 @@ class WikiSystem:
         """Obter estatísticas do wiki"""
         try:
             stats_key = self.get_stats_key()
-            stats_data = self.kv.get(stats_key)
-            stats = json.loads(stats_data.decode('utf-8'))
+            stats = self._load_json(stats_key)
         except KeyError:
             stats = {}
         except Exception as e:
@@ -352,8 +360,7 @@ class WikiSystem:
             total_views = 0
             for key, metadata in current_pages.items():
                 try:
-                    page_data = self.kv.get(key)
-                    page_dict = json.loads(page_data.decode('utf-8'))
+                    page_dict = self._load_json(key)
                     total_views += page_dict.get('views', 0)
                 except Exception as e:
                     print(f"Error calculating views for {key}: {e}")
@@ -375,8 +382,7 @@ class WikiSystem:
         """Atualizar estatísticas"""
         try:
             stats_key = self.get_stats_key()
-            stats_data = self.kv.get(stats_key)
-            stats = json.loads(stats_data.decode('utf-8'))
+            stats = self._load_json(stats_key)
         except KeyError:
             stats = {}
         except Exception as e:
@@ -386,8 +392,7 @@ class WikiSystem:
         stats[metric] = stats.get(metric, 0) + 1
         stats['last_updated'] = datetime.now().isoformat()
         
-        stats_json = json.dumps(stats).encode('utf-8')
-        self.kv.set(stats_key, stats_json, tags=['wiki_stats'])
+        self._save_json(stats_key, stats, tags=['wiki_stats'])
 
 # Instanciar sistema
 wiki = WikiSystem(kv_store)

@@ -1,6 +1,6 @@
 # 📚 Wiki System - Sistema Completo de Documentação
 
-Um sistema de wiki moderno e completo construído com **NADB** como backend de persistência, demonstrando funcionalidades avançadas como versionamento, estatísticas em tempo real, busca inteligente e colaboração.
+Um sistema de wiki moderno e completo construído com **NADB** como backend de persistência, com suporte a storage filesystem ou Redis via `NADB_STORAGE_ENGINE`, demonstrando funcionalidades avançadas como versionamento, estatísticas em tempo real, busca inteligente e colaboração.
 
 ## 🚀 Funcionalidades
 
@@ -17,7 +17,7 @@ Um sistema de wiki moderno e completo construído com **NADB** como backend de p
 - **Indexação por Tags**: Consultas otimizadas e rápidas
 - **Cache Inteligente**: Performance otimizada para consultas frequentes
 - **Backup Automático**: Sistema de backup integrado
-- **Pool de Conexões**: Redis otimizado para alta concorrência
+- **Backends Intercambiáveis**: filesystem local para desenvolvimento e Redis para deploys compartilhados
 
 ### ✅ **UX/UI Moderna**
 - **Auto-save**: Salvamento automático de rascunhos
@@ -46,20 +46,35 @@ examples/wiki/
 # Python 3.8+
 python --version
 
-# Redis Server
+# Redis Server, apenas se usar NADB_STORAGE_ENGINE=redis
 redis-server --version
 ```
 
 ### 2. **Instalar Dependências**
 ```bash
-# Instalar NADB com suporte Redis
-pip install nadb[redis]
+# Instalar NADB
+pip install nadb
+
+# Opcional, apenas para Redis
+pip install "nadb[redis]"
 
 # Instalar Flask e Markdown
 pip install Flask markdown
 ```
 
-### 3. **Iniciar Redis**
+### 3. **Escolher Storage**
+```bash
+# Padrão: filesystem em ./wiki_data
+export NADB_STORAGE_ENGINE=fs
+
+# Redis
+export NADB_STORAGE_ENGINE=redis
+export REDIS_HOST=localhost
+export REDIS_PORT=6379
+export REDIS_DB=3
+```
+
+### 4. **Iniciar Redis quando usar Redis**
 ```bash
 # Opção 1: Redis local
 redis-server
@@ -71,13 +86,13 @@ docker run -d -p 6379:6379 --name wiki-redis redis:alpine
 redis-server --appendonly yes
 ```
 
-### 4. **Executar o Wiki**
+### 5. **Executar o Wiki**
 ```bash
 cd examples/wiki
 python wiki_system.py
 ```
 
-### 5. **Acessar o Sistema**
+### 6. **Acessar o Sistema**
 - **Wiki Home**: http://localhost:5000
 - **Criar Página**: http://localhost:5000/create
 - **Buscar**: http://localhost:5000/search
@@ -120,19 +135,24 @@ author_pages = kv_store.query_by_tags(['wiki_page', f'author:{author}'])
 ### **3. Transações para Consistência**
 ```python
 # Criar nova versão mantendo consistência
+import json
+
 with kv_store.transaction() as tx:
-    # Remover tag 'current' da versão anterior
     if current_page:
-        old_tags = [tag for tag in current_page.get('_tags', []) if tag != 'current']
-        old_tags.append('archived')
-        tx.set(f"page:{slug}:v{current_page['version']}", current_page, tags=old_tags)
+        old_tags = ['wiki_page', f'slug:{slug}', 'archived']
+        tx.set(
+            f"page:{slug}:v{current_page['version']}",
+            json.dumps(current_page).encode("utf-8"),
+            tags=old_tags,
+        )
     
     # Salvar nova versão como atual
-    tx.set(f"page:{slug}:v{version}", page_data, tags=index_tags)
-    tx.set(f"page:{slug}", page_data, tags=index_tags)
+    page_bytes = json.dumps(page_data).encode("utf-8")
+    tx.set(f"page:{slug}:v{version}", page_bytes, tags=index_tags)
+    tx.set(f"page:{slug}", page_bytes, tags=index_tags)
     
     # Atualizar estatísticas atomicamente
-    tx.set('wiki_stats', updated_stats, tags=['wiki_stats'])
+    tx.set('wiki_stats', json.dumps(updated_stats).encode("utf-8"), tags=['wiki_stats'])
 ```
 
 ### **4. Versionamento Inteligente**
@@ -205,14 +225,18 @@ page_data = {
 ### **Personalizar Conexão Redis**
 ```python
 # Em wiki_system.py
-kv_store = NAKV(
-    backend_type='redis',
-    connection_params={
+from nadb import KeyValueStore
+
+kv_store = KeyValueStore(
+    data_folder_path='./wiki_data',
+    db='wiki_system',
+    namespace='pages',
+    storage_backend='redis',
+    storage_options={
         'host': 'localhost',
         'port': 6379,
         'db': 3,                    # DB separado para wiki
         'password': 'your_password', # Se necessário
-        'decode_responses': True,
         'max_connections': 20       # Pool de conexões
     }
 )
@@ -302,9 +326,9 @@ http://localhost:5000/edit/python-tutorial
 ### **3. Verificar Dados no Redis**
 ```bash
 redis-cli
-> KEYS page:*
-> HGETALL "page:python-tutorial"
-> SMEMBERS "tag:wiki_page"
+> KEYS nadb:*
+> HGETALL "nadb:meta:wiki_system:pages:page:python-tutorial"
+> SMEMBERS "nadb:tag:wiki_system:pages:wiki_page"
 ```
 
 ## 🎨 Customização

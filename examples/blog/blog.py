@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Simple Blog Engine using NADB with Redis Backend
+Simple Blog Engine using NADB with filesystem or Redis storage
 
 This example demonstrates how to build a simple blog application using NADB
-for data storage with Redis as the backend. The blog supports:
+for data storage. Set NADB_STORAGE_ENGINE=fs or NADB_STORAGE_ENGINE=redis.
+The blog supports:
 - Creating, editing, and deleting posts
 - Tagging posts for categorization
 - Searching posts by tags
@@ -11,8 +12,8 @@ for data storage with Redis as the backend. The blog supports:
 - Simple web interface
 
 Requirements:
-- pip install Flask nadb[redis]
-- Redis server running on localhost:6379
+- pip install Flask nadb
+- pip install "nadb[redis]" and run Redis when NADB_STORAGE_ENGINE=redis
 
 Usage:
 - python blog.py
@@ -20,7 +21,6 @@ Usage:
 """
 
 import os
-import json
 import uuid
 import atexit
 from datetime import datetime
@@ -37,38 +37,44 @@ kv_sync = KeyValueSync(flush_interval_seconds=5)
 kv_sync.start()
 
 # Get Redis configuration from environment variables
+storage_engine = os.environ.get('NADB_STORAGE_ENGINE', 'fs').strip().lower()
+if storage_engine not in {'fs', 'redis'}:
+    raise ValueError("NADB_STORAGE_ENGINE must be 'fs' or 'redis'")
+
 redis_host = os.environ.get('REDIS_HOST', 'localhost')
 redis_port = int(os.environ.get('REDIS_PORT', 6379))
 redis_db = int(os.environ.get('REDIS_DB', 0))
+redis_password = os.environ.get('REDIS_PASSWORD')
+storage_options = None
+if storage_engine == 'redis':
+    storage_options = {
+        "host": redis_host,
+        "port": redis_port,
+        "db": redis_db,
+        "password": redis_password,
+    }
 
-# Initialize KeyValueStore with Redis backend
+# Initialize KeyValueStore with the selected backend
 kv_store = KeyValueStore(
     data_folder_path='./blog_data',
     db='blog_engine',
     buffer_size_mb=2,
     namespace='posts',
     sync=kv_sync,
-    storage_backend="redis",
+    storage_backend=storage_engine,
+    storage_options=storage_options,
     enable_transactions=True,    # Enable transactions for data consistency
     enable_backup=True,          # Enable backup functionality
     enable_indexing=True,        # Enable advanced indexing for fast queries
     cache_size=1000             # Cache up to 1000 queries
 )
 
-# Configure Redis connection if needed
-if redis_host != 'localhost' or redis_port != 6379 or redis_db != 0:
-    from storage_backends.redis import RedisStorage
-    custom_redis_storage = RedisStorage(
-        base_path='./blog_data',
-        host=redis_host,
-        port=redis_port,
-        db=redis_db
-    )
-    kv_store.storage = custom_redis_storage
-
 # Ensure NADB sync stops gracefully on exit
 atexit.register(kv_sync.sync_exit)
-print(f"NADB Blog Engine initialized with Redis at {redis_host}:{redis_port} (DB: {redis_db})")
+if storage_engine == 'redis':
+    print(f"NADB Blog Engine initialized with Redis at {redis_host}:{redis_port} (DB: {redis_db})")
+else:
+    print("NADB Blog Engine initialized with filesystem storage at ./blog_data")
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -134,9 +140,8 @@ def save_post(post):
         nadb_tags.extend([f"tag:{tag}" for tag in post.tags])
         nadb_tags.append(f"author:{post.author}")
         
-        # Save to NADB with tags
-        value = json.dumps(post.to_dict()).encode('utf-8')
-        kv_store.set(key, value, tags=nadb_tags)
+        # Save to NADB as JSON with tags
+        kv_store.set_json(key, post.to_dict(), tags=nadb_tags)
         
         print(f"Saved blog post: {post.title} ({post.id})")
         return post
@@ -148,8 +153,7 @@ def get_post(post_id):
     """Retrieve a blog post from NADB."""
     try:
         key = get_post_key(post_id)
-        data = kv_store.get(key)
-        post_dict = json.loads(data.decode('utf-8'))
+        post_dict = kv_store.get_json(key)
         return BlogPost.from_dict(post_dict)
     except KeyError:
         return None
@@ -182,8 +186,7 @@ def get_all_posts(limit=50, published_only=True):
         posts = []
         for key, metadata in results.items():
             try:
-                post_data = kv_store.get(key)
-                post_dict = json.loads(post_data.decode('utf-8'))
+                post_dict = kv_store.get_json(key)
                 posts.append(BlogPost.from_dict(post_dict))
             except Exception as e:
                 print(f"Error loading post {key}: {e}")
@@ -208,8 +211,7 @@ def search_posts_by_tag(tag, limit=50):
         posts = []
         for key, metadata in results.items():
             try:
-                post_data = kv_store.get(key)
-                post_dict = json.loads(post_data.decode('utf-8'))
+                post_dict = kv_store.get_json(key)
                 posts.append(BlogPost.from_dict(post_dict))
             except Exception as e:
                 print(f"Error loading post {key}: {e}")
@@ -447,7 +449,7 @@ if __name__ == '__main__':
                 title="Welcome to NADB Blog!",
                 content="""# Welcome to NADB Blog Engine!
 
-This is a simple blog engine built using **NADB** (Not A Database) with Redis as the backend storage.
+This is a simple blog engine built using **NADB** (Not A Database) with filesystem or Redis storage.
 
 ## Features
 

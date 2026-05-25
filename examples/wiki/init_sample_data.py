@@ -120,18 +120,17 @@ NADB é mais que um simples key-value store. É uma solução completa que ofere
 ## 💻 Exemplo de Uso
 
 ```python
-from nadb import KeyValueStore, KeyValueSync
+from nadb import KeyValueStore
+import os
 
 # Inicializar NADB
-kv_sync = KeyValueSync(flush_interval_seconds=5)
-kv_sync.start()
-
+storage_engine = os.environ.get("NADB_STORAGE_ENGINE", "fs")
 kv_store = KeyValueStore(
     data_folder_path='./data',
     db='my_app',
     namespace='users',
-    sync=kv_sync,
-    storage_backend="redis",
+    storage_backend=storage_engine,
+    storage_options={"host": "localhost", "port": 6379, "db": 0} if storage_engine == "redis" else None,
     enable_transactions=True,
     enable_backup=True,
     enable_indexing=True
@@ -139,11 +138,7 @@ kv_store = KeyValueStore(
 
 # Salvar dados com tags
 user_data = {"name": "João", "email": "joao@email.com"}
-kv_store.set(
-    "user:123", 
-    json.dumps(user_data).encode('utf-8'),
-    tags=["user", "active", "premium"]
-)
+kv_store.set_json("user:123", user_data, tags=["user", "active", "premium"])
 
 # Buscar por tags
 results = kv_store.query_by_tags(["user", "premium"])
@@ -269,7 +264,7 @@ Esta página demonstra todas as funcionalidades de **Markdown** suportadas pelo 
 ## 💻 Código
 
 ### Código inline
-Use `kv_store.get(key)` para obter dados.
+Use `kv_store.get_json(key)`, `kv_store.get_text(key)` ou `kv_store.get_bytes(key)` para obter dados no tipo esperado.
 
 ### Bloco de código simples
 ```
@@ -280,13 +275,16 @@ def hello_world():
 ### Código Python com syntax highlighting
 ```python
 from nadb import KeyValueStore
+import os
 
 # Inicializar NADB
+storage_engine = os.environ.get("NADB_STORAGE_ENGINE", "fs")
 kv_store = KeyValueStore(
     data_folder_path='./data',
     db='wiki',
     namespace='pages',
-    storage_backend="redis"
+    storage_backend=storage_engine,
+    storage_options={"host": "localhost", "port": 6379, "db": 3} if storage_engine == "redis" else None
 )
 
 # Salvar página
@@ -296,11 +294,7 @@ page_data = {
     'tags': ['wiki', 'exemplo']
 }
 
-kv_store.set(
-    'page:exemplo',
-    json.dumps(page_data).encode('utf-8'),
-    tags=['wiki_page', 'exemplo']
-)
+kv_store.set_json('page:exemplo', page_data, tags=['wiki_page', 'exemplo'])
 ```
 
 ### Código JavaScript
@@ -370,7 +364,7 @@ function updatePreview() {
 > ⚠️ **Atenção**: Sempre faça backup antes de atualizações importantes.
 
 ### Erro
-> ❌ **Erro**: Não esqueça de inicializar o KeyValueSync.
+> ❌ **Erro**: Não misture JSON manual com `get()`: prefira `set_json()` e `get_json()`.
 
 ### Sucesso
 > ✅ **Sucesso**: NADB configurado corretamente!
@@ -528,17 +522,22 @@ with kv_store.transaction() as tx:
 
 ### Redis Backend
 ```python
-# Pool de conexões otimizado
-from storage_backends.redis import RedisStorage
+import os
 
-redis_storage = RedisStorage(
-    base_path='./data',
-    host='localhost',
-    port=6379,
-    db=0,
-    max_connections=20,  # Pool de conexões
-    socket_keepalive=True,
-    socket_keepalive_options={}
+storage_engine = os.environ.get("NADB_STORAGE_ENGINE", "fs")
+kv_store = KeyValueStore(
+    data_folder_path='./data',
+    db='wiki',
+    namespace='pages',
+    storage_backend=storage_engine,
+    storage_options={
+        'host': 'localhost',
+        'port': 6379,
+        'db': 0,
+        'max_connections': 20,  # Pool de conexões
+        'socket_keepalive': True,
+        'socket_keepalive_options': {}
+    } if storage_engine == "redis" else None
 )
 ```
 
@@ -572,6 +571,9 @@ print(f"Average response time: {stats.get('avg_response_time', 0)}ms")
 ### Para Aplicações Web
 ```python
 kv_store = KeyValueStore(
+    data_folder_path='./data',
+    db='web_app',
+    namespace='cache',
     buffer_size_mb=5,        # Buffer maior para writes
     cache_size=2000,         # Cache extenso
     enable_indexing=True,    # Indexação ativa
@@ -582,20 +584,25 @@ kv_store = KeyValueStore(
 ### Para Analytics
 ```python
 kv_store = KeyValueStore(
+    data_folder_path='./data',
+    db='analytics',
+    namespace='events',
     buffer_size_mb=10,       # Buffer grande para bulk writes
     cache_size=5000,         # Cache muito extenso
     enable_indexing=True,    # Consultas rápidas por tags
-    flush_interval_seconds=1 # Flush frequente
+    cache_ttl_seconds=1      # Cache curto para dados recentes
 )
 ```
 
 ### Para IoT/High Throughput
 ```python
 kv_store = KeyValueStore(
+    data_folder_path='./data',
+    db='iot',
+    namespace='telemetry',
     buffer_size_mb=20,       # Buffer máximo
     cache_size=1000,         # Cache moderado
-    enable_indexing=False,   # Menos overhead
-    flush_interval_seconds=5 # Flush menos frequente
+    enable_indexing=False    # Menos overhead
 )
 ```
 
@@ -619,18 +626,18 @@ kv_store = KeyValueStore(
 ```python
 # Cache de sessões
 session_tags = ['session', f'user:{user_id}', 'active']
-kv_store.set(f'session:{session_id}', session_data, tags=session_tags)
+kv_store.set_json(f'session:{session_id}', session_data, tags=session_tags)
 
 # Cache de páginas
 page_tags = ['cache', 'page', f'url:{url_hash}', 'valid']
-kv_store.set(f'page_cache:{url_hash}', html_content, tags=page_tags)
+kv_store.set_text(f'page_cache:{url_hash}', html_content, tags=page_tags)
 ```
 
 ### 2. Analytics em Tempo Real
 ```python
 # Métricas por minuto
 metric_tags = ['metric', 'pageview', f'date:{today}', f'hour:{hour}']
-kv_store.set(f'metric:{timestamp}', metric_data, tags=metric_tags)
+kv_store.set_json(f'metric:{timestamp}', metric_data, tags=metric_tags)
 
 # Agregações rápidas
 hourly_metrics = kv_store.query_by_tags(['metric', 'pageview', f'hour:{hour}'])
@@ -646,7 +653,7 @@ product_tags = [
     f'price_range:{price_range}',
     'in_stock'
 ]
-kv_store.set(f'product:{product_id}', product_data, tags=product_tags)
+kv_store.set_json(f'product:{product_id}', product_data, tags=product_tags)
 ```
 
 ## ⚠️ Armadilhas Comuns
@@ -679,8 +686,8 @@ recent_posts = kv_store.query_by_tags_advanced(
 with kv_store.transaction() as tx:
     tx.set('simple_key', simple_value)
 
-# ✅ SET direto para operações simples
-kv_store.set('simple_key', simple_value, tags=['simple'])
+# ✅ SET tipado direto para operações simples
+kv_store.set_text('simple_key', simple_value, tags=['simple'])
 ```
 
 ## 🔍 Debugging e Profiling

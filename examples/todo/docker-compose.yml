@@ -10,6 +10,7 @@ services:
     ports:
       - "5001:5001"
     environment:
+      - NADB_STORAGE_ENGINE=${NADB_STORAGE_ENGINE:-redis}
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
       - REDIS_DB=${REDIS_DB:-0}

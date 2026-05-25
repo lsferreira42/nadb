@@ -5,6 +5,9 @@ This package contains storage backend implementations for the NADB key-value sto
 Currently supported backends:
 - fs: File system storage
 - redis: Redis storage
+- memory: In-memory ephemeral storage
+- sqlite: Single-file SQLite storage
+- s3: S3-compatible object storage
 """
 
 from importlib import import_module
@@ -20,7 +23,7 @@ class StorageFactory:
     """Factory for creating storage backends."""
     
     @staticmethod
-    def create_storage(backend_type, **kwargs):
+    def create_storage(backend_type, allow_backend_fallback=False, **kwargs):
         """
         Create a storage backend of the specified type.
         
@@ -39,7 +42,10 @@ class StorageFactory:
             backend_classes = {
                 "fs": "FileSystemStorage",
                 "redis": "RedisStorage",
-                "memcache": "MemcacheStorage"
+                "memcache": "MemcacheStorage",
+                "memory": "MemoryStorage",
+                "sqlite": "SqliteStorage",
+                "s3": "S3Storage",
             }
             
             # Get the class name from the mapping or use default naming convention
@@ -57,9 +63,7 @@ class StorageFactory:
             
         except (ImportError, AttributeError) as e:
             logger.error(f"Failed to load storage backend '{backend_type}': {str(e)}")
-            # Fall back to filesystem storage
-            if backend_type != "fs":
+            if allow_backend_fallback and backend_type != "fs":
                 logger.info("Falling back to filesystem storage")
                 return StorageFactory.create_storage("fs", **kwargs)
-            else:
-                raise ValueError(f"Cannot create storage backend: {str(e)}") 
+            raise ValueError(f"Cannot create storage backend '{backend_type}': {str(e)}") 

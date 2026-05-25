@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-# Ensure Flask and nadb[redis] are installed:
-# pip install Flask nadb[redis]
-# Make sure a Redis server is running locally (default port 6379)
+# Ensure Flask and NADB are installed:
+# pip install Flask nadb
+# For Redis mode, also install nadb[redis] and run a Redis server.
+# Select storage with NADB_STORAGE_ENGINE=fs or NADB_STORAGE_ENGINE=redis.
 
 import uuid
-import json
 import atexit
 import re # For UUID validation
 import functools # Needed for decorator
@@ -67,38 +67,46 @@ def cache_decorator(ttl=300):  # Time to live in seconds (default 5 minutes)
 kv_sync = KeyValueSync(flush_interval_seconds=5)
 kv_sync.start()
 
-# Get Redis configuration from environment variables
+# Get storage and Redis configuration from environment variables
+storage_engine = os.environ.get('NADB_STORAGE_ENGINE', 'fs').strip().lower()
+if storage_engine not in {'fs', 'redis'}:
+    raise ValueError("NADB_STORAGE_ENGINE must be 'fs' or 'redis'")
+
 redis_host = os.environ.get('REDIS_HOST', 'localhost')
 redis_port = int(os.environ.get('REDIS_PORT', 6379))
 redis_db = int(os.environ.get('REDIS_DB', 0))
 redis_password = os.environ.get('REDIS_PASSWORD', None)
+storage_options = None
+if storage_engine == 'redis':
+    storage_options = {
+        "host": redis_host,
+        "port": redis_port,
+        "db": redis_db,
+        "password": redis_password,
+    }
 
-# Initialize KeyValueStore with Redis backend
+# Initialize KeyValueStore with the selected backend
 # Using db='multi_todo_db' and namespace='lists'
-# Buffer size is less critical for Redis as writes often go direct, but still used
 kv_store = KeyValueStore(
     data_folder_path='./nadb_data', # FS path needed even for Redis (e.g., future metadata fallback?)
     db='multi_todo_db', # Use a different DB name
     buffer_size_mb=1,
     namespace='lists', # Namespace changed slightly to reflect multiple lists
     sync=kv_sync,
-    storage_backend="redis"
+    storage_backend=storage_engine,
+    storage_options=storage_options,
+    enable_transactions=True,
+    enable_backup=True,
+    enable_indexing=True,
+    cache_size=1000,
 )
-
-# Configure Redis backend with environment variables
-from storage_backends.redis import RedisStorage
-custom_redis_storage = RedisStorage(
-    base_path='./nadb_data',
-    host=redis_host,
-    port=redis_port,
-    db=redis_db,
-    password=redis_password
-)
-kv_store.storage = custom_redis_storage
 
 # Ensure NADB sync stops gracefully on exit
 atexit.register(kv_sync.sync_exit)
-print(f"NADB initialized for Multi-List TODO app with Redis at {redis_host}:{redis_port} (DB: {redis_db})")
+if storage_engine == 'redis':
+    print(f"NADB initialized for Multi-List TODO app with Redis at {redis_host}:{redis_port} (DB: {redis_db})")
+else:
+    print("NADB initialized for Multi-List TODO app with filesystem storage at ./nadb_data")
 
 # --- Flask App Setup ---
 app = Flask(__name__)
@@ -120,18 +128,11 @@ def get_subtask_key(list_uuid, subtask_id):
 def get_all_list_keys(list_uuid):
     """Retrieves all NADB keys (tasks and subtasks) for a specific list UUID."""
     key_prefix = generate_list_key_prefix(list_uuid)
-    all_keys = []
     try:
-        # Use the storage's query_metadata with a key pattern
-        all_metadata = kv_store.storage.query_metadata({
-            "db": kv_store.db,
-            "namespace": kv_store.namespace,
-            "key": f"{key_prefix}*" # Get all keys starting with the list prefix
-        }) or []
-        all_keys = [meta.get("key") for meta in all_metadata if meta.get("key")]
+        return kv_store.keys_with_prefix(key_prefix)
     except Exception as e:
         print(f"Error querying keys for list {list_uuid}: {e}\n{traceback.format_exc()}")
-    return all_keys
+        return []
 
 # CORRECTED Helper to check list existence efficiently
 @cache_decorator(ttl=30)  # Cache list existence for 30 seconds
@@ -149,30 +150,11 @@ def get_all_tasks_with_subtasks(list_uuid):
     key_prefix = generate_list_key_prefix(list_uuid)
 
     try:
-        # Attempting prefix scan via Redis storage backend's query_metadata
-        # This relies on the backend implementation correctly handling prefixing/patterns
-        # The query_metadata in redis.py backend uses SCAN with patterns derived
-        # from db:namespace:key - we need to see if querying with a partial key works.
-        # Let's query for the prefix directly. If this fails, we might need direct SCAN.
-        # NOTE: A more robust way would be direct SCAN access if the backend allows it.
-        # Example using direct scan (if storage exposes redis connection):
-        # for key_bytes in kv_store.storage.redis.scan_iter(match=f"{kv_store.storage.meta_prefix}{kv_store.db}:{kv_store.namespace}:{key_prefix}*"):
-        #    key_str = key_bytes.decode('utf-8').split(':')[-1] # Extract the task/subtask key part
-
-        # Let's try querying with a 'key' pattern first via the abstraction
-        all_metadata = kv_store.storage.query_metadata({
-            "db": kv_store.db,
-            "namespace": kv_store.namespace,
-            "key": f"{key_prefix}*" # Using key pattern matching based on prefix
-        }) or []
-
-        for meta in all_metadata:
-            key_str = meta.get("key") # This should be the full key like 'list:uuid:task:id'
-            if key_str:
-                if key_str.startswith(f"{key_prefix}task:"):
-                    task_keys.append(key_str)
-                elif key_str.startswith(f"{key_prefix}subtask:"):
-                    subtask_keys.append(key_str)
+        for key_str in kv_store.keys_with_prefix(key_prefix):
+            if key_str.startswith(f"{key_prefix}task:"):
+                task_keys.append(key_str)
+            elif key_str.startswith(f"{key_prefix}subtask:"):
+                subtask_keys.append(key_str)
 
     except Exception as e:
         print(f"Error querying metadata for list {list_uuid}: {e}\n{traceback.format_exc()}")
@@ -181,8 +163,7 @@ def get_all_tasks_with_subtasks(list_uuid):
     # Fetch all subtasks for this list
     for key in subtask_keys:
         try:
-            subtask_data = kv_store.get(key) # Use the full key
-            subtask = json.loads(subtask_data.decode('utf-8'))
+            subtask = kv_store.get_json(key) # Use the full key
             # Ensure subtask belongs to the correct list (extra check)
             if subtask.get('list_id') == list_uuid:
                  all_subtasks[subtask['id']] = subtask
@@ -194,8 +175,7 @@ def get_all_tasks_with_subtasks(list_uuid):
     # Fetch tasks and link subtasks for this list
     for key in task_keys:
         try:
-            task_data = kv_store.get(key) # Use the full key
-            task = json.loads(task_data.decode('utf-8'))
+            task = kv_store.get_json(key) # Use the full key
             # Ensure task belongs to the correct list (extra check)
             if task.get('list_id') == list_uuid:
                 task_subtask_ids = task.get('subtasks', [])
@@ -212,8 +192,7 @@ def get_task(list_uuid, task_id):
     """Retrieves a single task dict for a specific list."""
     key = get_task_key(list_uuid, task_id)
     try:
-        task_data = kv_store.get(key)
-        task = json.loads(task_data.decode('utf-8'))
+        task = kv_store.get_json(key)
         # Verify list_id match
         if task.get('list_id') != list_uuid:
              print(f"Warning: Task {task_id} retrieved but belongs to different list {task.get('list_id')}")
@@ -232,8 +211,7 @@ def get_subtask(list_uuid, subtask_id):
     # For now, assume list_uuid is provided.
     key = get_subtask_key(list_uuid, subtask_id)
     try:
-        subtask_data = kv_store.get(key)
-        subtask = json.loads(subtask_data.decode('utf-8'))
+        subtask = kv_store.get_json(key)
         # Verify list_id match (Subtasks store parent_task_id, but we need list_id directly)
         # We should add list_id to subtasks when saving.
         if subtask.get('list_id') != list_uuid:
@@ -252,10 +230,9 @@ def save_task(list_uuid, task_data):
     try:
         task_data['list_id'] = list_uuid # Ensure list_id is stored
         task_data.pop('subtasks_resolved', None) # Don't save resolved objects
-        value = json.dumps(task_data).encode('utf-8')
         # Add list_id tag for potential querying
         tags = ["task", f"list:{list_uuid}"]
-        kv_store.set(key, value, tags=tags)
+        kv_store.set_json(key, task_data, tags=tags)
         print(f"Saved task: {key}")
         
         # Clear relevant caches
@@ -273,10 +250,9 @@ def save_subtask(list_uuid, subtask_data):
     parent_task_id = subtask_data['parent_task_id']
     try:
         subtask_data['list_id'] = list_uuid # Ensure list_id is stored
-        value = json.dumps(subtask_data).encode('utf-8')
         # Add list_id and parent task tags
         tags = ["subtask", f"list:{list_uuid}", f"parent:{parent_task_id}"]
-        kv_store.set(key, value, tags=tags)
+        kv_store.set_json(key, subtask_data, tags=tags)
         print(f"Saved subtask: {key}")
         
         # Clear relevant caches
@@ -1370,7 +1346,7 @@ def create_list():
     placeholder_key = f"{generate_list_key_prefix(new_list_id)}_exists"
     try:
         # Create a placeholder entry to mark the list as existing
-        kv_store.set(placeholder_key, b'1', tags=[f"list:{new_list_id}", "placeholder"])
+        kv_store.set_text(placeholder_key, "1", tags=[f"list:{new_list_id}", "placeholder"])
         print(f"Created placeholder for new list: {new_list_id}")
         # Redirect to the new list's page only if placeholder creation succeeded
         return redirect(url_for('show_list', list_uuid=new_list_id))

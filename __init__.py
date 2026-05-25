@@ -1,14 +1,15 @@
 # NADB - Not A Database
 # A high-performance key-value store with advanced features
 
-from nakv import KeyValueStore, KeyValueSync, KeyValueMetadata, PerformanceMetrics
+from _version import __version__
+from nakv import KeyValueStore, KeyValueSync, KeyValueMetadata, PerformanceMetrics, StoredValue, open_store
 
 # Try to import advanced features, but don't fail if they're not available
 try:
     from logging_config import LoggingConfig
-    __all__ = ['KeyValueStore', 'KeyValueSync', 'KeyValueMetadata', 'PerformanceMetrics', 'LoggingConfig']
+    __all__ = ['KeyValueStore', 'KeyValueSync', 'KeyValueMetadata', 'PerformanceMetrics', 'StoredValue', 'LoggingConfig', 'open_store']
 except ImportError:
-    __all__ = ['KeyValueStore', 'KeyValueSync', 'KeyValueMetadata', 'PerformanceMetrics']
+    __all__ = ['KeyValueStore', 'KeyValueSync', 'KeyValueMetadata', 'PerformanceMetrics', 'StoredValue', 'open_store']
 
 try:
     from transaction import TransactionManager
@@ -28,6 +29,5 @@ try:
 except ImportError:
     pass
 
-__version__ = "2.0.0"
 __author__ = "NADB Contributors"
 __description__ = "A high-performance key-value store with advanced features"

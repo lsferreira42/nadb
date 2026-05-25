@@ -18,7 +18,7 @@ from storage_backends.base import StorageBackend, BackendCapabilities, COMPRESS_
 class FileSystemStorage(StorageBackend):
     """A storage backend that uses the local filesystem to store data."""
 
-    def __init__(self, base_path):
+    def __init__(self, base_path, file_mode=0o600):
         """
         Initialize the filesystem storage backend.
 
@@ -26,6 +26,7 @@ class FileSystemStorage(StorageBackend):
             base_path: Base directory for storing files
         """
         self.base_path = base_path
+        self.file_mode = file_mode
         os.makedirs(base_path, exist_ok=True)
         self.logger = logging.getLogger("nadb.fs_storage")
 
@@ -112,10 +113,10 @@ class FileSystemStorage(StorageBackend):
             ValueError: If path traversal attempt is detected
         """
         # Normalize the base path
-        normalized_base = os.path.normpath(os.path.abspath(self.base_path))
+        normalized_base = os.path.realpath(os.path.abspath(self.base_path))
 
         # Join and normalize the full path
-        full_path = os.path.normpath(os.path.abspath(
+        full_path = os.path.realpath(os.path.abspath(
             os.path.join(self.base_path, relative_path)
         ))
 
@@ -199,8 +200,7 @@ class FileSystemStorage(StorageBackend):
                     mode = stat.S_IMODE(os.stat(full_path).st_mode)
                     os.chmod(temp_filename, mode)
                 else:
-                    # Set default permissions (readable/writable by owner, readable by others)
-                    os.chmod(temp_filename, 0o644)
+                    os.chmod(temp_filename, getattr(self, "file_mode", 0o600))
             except OSError as e:
                 self.logger.warning(f"Failed to set permissions on {temp_filename}: {str(e)}")
                 
@@ -330,40 +330,13 @@ class FileSystemStorage(StorageBackend):
             return False
     
     def compress_data(self, data, compression_enabled):
-        """
-        Compress data if appropriate.
-        
-        Args:
-            data: Binary data to potentially compress
-            compression_enabled: Whether compression is enabled
-            
-        Returns:
-            Compressed data with header or original data
-        """
-        if not compression_enabled or len(data) <= COMPRESS_MIN_SIZE:
-            return data
-            
-        # Add a simple header to indicate compression
-        compressed = zlib.compress(data, COMPRESS_LEVEL)
-        return b'CMP:' + compressed
+        """Compress data using the shared NADB envelope format."""
+        return super().compress_data(data, compression_enabled)
     
     def decompress_data(self, data):
-        """
-        Decompress data if it was compressed.
-        
-        Args:
-            data: Potentially compressed data
-            
-        Returns:
-            Decompressed data
-        """
-        if not self._is_compressed(data):
-            return data
-            
-        # Skip the compression header
-        compressed_data = data[4:]
-        return zlib.decompress(compressed_data)
+        """Decompress data using the shared NADB envelope format."""
+        return super().decompress_data(data)
     
     def _is_compressed(self, data):
-        """Check if data has the compression header."""
-        return data.startswith(b'CMP:')
+        """Check if data has a supported compression header."""
+        return super()._is_compressed(data)

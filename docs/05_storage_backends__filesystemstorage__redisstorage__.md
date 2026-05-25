@@ -1,57 +1,79 @@
-# Chapter 5: Storage Backends & Compression
+# Storage Backends
 
-NADB achieves its flexibility by decoupling the high-level `KeyValueStore` features (Transactions, Indexing, Logging, Backup) from low-level data storage through specialized **Storage Backends**. 
+NADB ships with filesystem, Redis, memory, SQLite, and S3-compatible backends. All store bytes and expose the same storage interface to `KeyValueStore`.
 
-Every storage backend extends the abstract base class `StorageBackend` and implements common tasks like writing, reading, deleting data files or keys, getting size limits, and managing path logic.
-
-NADB relies heavily on the **Capabilities Architecture** (see Chapter 13) to determine the behavior around buffering and data flushing depending on what the selected storage backend natively optimally supports.
-
----
-
-## 💾 Available Storage Backends
-
-### 1. `FileSystemStorage` (`fs`, Default)
-The `FileSystemStorage` uses the local disk array to maintain persistence.
-
-**Key Features:**
-*   **Hierarchical Location Strategy:** It splits keys up using `blake2b` hashes (e.g. `path/to/db/a3/b4/a3b4...hash`) to ensure thousands of keys don't clutter a single disk directory.
-*   **Buffered Writes Strategy:** Because direct individual disk writes are expensive, `fs` uses the `KeyValueStore.use_buffering = True` logic. Data is aggregated in-memory and committed asynchronously in batched threads during `flush_to_disk()`.
-*   **Atomic Rename Operations:** During flushing, actual files are written to safe temporary files (`.nadb_temp...`) before executing a POSIX-atomic renaming operation (`os.rename()`). This inherently prevents data corruption related to half-written files.
-*   **Path Traversal Protections:** Resolves exact absolute paths natively stopping directory escape bugs (`../../etc/passwd`).
-
-### 2. `RedisStorage` (`redis` plugin)
-The `RedisStorage` relies on an active Redis server to maintain state, beneficial for scaling out the service over the network. 
-
-**Key Features:**
-*   **Connection Pooling Mechanism:** Built into NADB is a high-concurrency robust `ConnectionPool` engine configuring `redis.Redis(connection_pool=...)` behind scenes.
-*   **Immediate Writing Strategy:** Redis operations are lightweight memory updates. The `KeyValueStore` disables its internal buffering lock here and delegates direct data writes to Redis continuously.
-*   **Native TTL Supported:** Expiration commands translate directly to Redis' internal `EXPIRE` methods.
-*   **Native Metadata Structures:** Uses Redis Hashes (`HSET`/`HGETALL`) instead of relying on local SQLite databases for tracking properties like keys size and tags, significantly enhancing clustered application deployments.
-
-*Note: Requires `pip install nadb[redis]` to initialize.*
-
----
-
-## 🗜️ Data Compression (`zlib`)
-
-Both backends include first-class operations to shrink data storage requirements via `compression_enabled` passed directly to the `KeyValueStore` constructor. 
+## Filesystem
 
 ```python
-# Instantiating KeyValueStore with built-in compression
-kv_store = KeyValueStore(
-    storage_backend="fs", 
-    compression_enabled=True,
+store = KeyValueStore(
     data_folder_path="./data",
-    ...
+    db="app",
+    namespace="dev",
+    storage_backend="fs",
 )
 ```
 
-**How it Works:**
-1.   Whenever `KeyValueStore` executes a `set()`, it performs a condition check over the minimum configured compression threshold (`COMPRESS_MIN_SIZE` defaults). Small payloads are kept verbatim to eliminate unneeded CPU burning.
-2.   Eligible data is zipped up using Python's native `zlib` standard library.
-3.   A `CMP:` header prefix is pushed upfront to the binary record payload indicating to NADB read methods that the record carries compressed assets on reading paths.
+Filesystem storage:
 
-This system creates highly significant storage savings when storing sizable byte blocks (like JSON models, long strings, binary document dumps).
+- writes files with atomic temp-file replacement,
+- uses owner-only permissions by default,
+- checks paths with symlink-aware real paths,
+- stores metadata in SQLite,
+- benefits from buffered writes.
 
----
-**Next up:** [Data Buffering & Flushing](06_data_buffering___flushing_.md)
+## Redis
+
+```python
+store = KeyValueStore(
+    db="app",
+    namespace="prod",
+    storage_backend="redis",
+    storage_options={
+        "host": "localhost",
+        "port": 6379,
+        "db": 0,
+        "password": None,
+        "key_prefix": "myapp:nadb",
+        "max_connections": 20,
+    },
+)
+```
+
+Redis storage:
+
+- writes immediately,
+- uses Redis hashes for metadata,
+- uses native TTL where available,
+- uses connection pooling,
+- uses SCAN iteration in production paths,
+- supports a configurable key prefix for shared Redis databases.
+
+## Memory
+
+`storage_backend="memory"` keeps data and metadata in process memory. It is useful for fast tests and ephemeral workloads.
+
+## SQLite
+
+`storage_backend="sqlite"` stores values and metadata in a single SQLite file with WAL mode.
+
+## S3-Compatible
+
+`storage_backend="s3"` uses `boto3` when available. Without `boto3`, it uses a local bucket-shaped fallback for development and tests.
+
+## Compression
+
+NADB compresses values larger than the compression threshold when compression is enabled. New compressed records use a versioned NADB binary envelope. Legacy `CMP:` records remain readable for backward compatibility.
+
+## Metadata
+
+Metadata records can include:
+
+- `value_type`
+- `encoding`
+- `content_type`
+- `logical_size`
+- `stored_size`
+- `checksum`
+- `ttl`
+- `expires_at`
+- `tags`

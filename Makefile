@@ -63,12 +63,12 @@ test-fs: dev-install
 # Run Redis tests specifically
 test-redis: install-redis
 	@echo "Redis must be running on localhost:6379 for these tests"
-	PYTHONPATH=. pytest -v nakv_tests_redis.py
+	NADB_REQUIRE_REDIS=1 PYTHONPATH=. pytest -v nakv_tests_redis.py
 
 # Run storage backends tests specifically
 test-backends: install-redis
 	@echo "Redis must be running on localhost:6379 for these tests"
-	PYTHONPATH=. pytest -v nakv_tests_storage_backends.py
+	NADB_REQUIRE_REDIS=1 PYTHONPATH=. pytest -v nakv_tests_storage_backends.py
 
 # Run advanced features tests specifically
 test-advanced: install-redis
@@ -78,7 +78,7 @@ test-advanced: install-redis
 # Run all tests for all backends and features
 test-all: install-redis
 	@echo "Redis must be running on localhost:6379 for these tests"
-	PYTHONPATH=. pytest -v nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py
+	NADB_REQUIRE_REDIS=1 PYTHONPATH=. pytest -v nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py
 
 # Run tests without slow tests (marked with @pytest.mark.slow)
 test-quick: dev-install
@@ -91,7 +91,7 @@ test-core: install-redis
 # Run tests with verbose output and stop on first failure
 test-debug: install-redis
 	@echo "Redis must be running on localhost:6379 for these tests"
-	PYTHONPATH=. pytest -v -x nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py
+	NADB_REQUIRE_REDIS=1 PYTHONPATH=. pytest -v -x nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py
 
 # Run specific test file (usage: make test-file FILE=test_advanced_features.py)
 test-file: install-redis
@@ -102,14 +102,14 @@ test-file: install-redis
 test-cov: 
 	pip install -e ".[redis,dev]"
 	@echo "Redis must be running on localhost:6379 for these tests"
-	PYTHONPATH=. pytest --cov=. nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py --cov-report=term --cov-report=html
+	NADB_REQUIRE_REDIS=1 PYTHONPATH=. pytest --cov=. nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py --cov-report=term --cov-report=html
 	@echo "HTML coverage report generated in htmlcov/"
 
 # Run tests with strict warnings (fail on warnings)
 test-strict: install-redis
 	@echo "Redis must be running on localhost:6379 for these tests"
 	@echo "Running tests with strict warnings (will fail on any warnings)"
-	PYTHONPATH=. pytest -v --tb=short nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py
+	NADB_REQUIRE_REDIS=1 PYTHONPATH=. pytest -v --tb=short nakv_tests_fs.py nakv_tests_redis.py nakv_tests_storage_backends.py test_advanced_features.py
 
 # Run linting tools
 lint:

@@ -284,9 +284,20 @@ class BackupManager:
                         # Decode base64 value back to bytes
                         value = base64.b64decode(item_data['value'])
                         tags = item_data.get('tags', [])
+                        metadata = item_data.get('metadata', {})
                         
                         # Restore the key
-                        self.kv_store.set(key, value, tags)
+                        ttl_seconds = None
+                        expires_at = metadata.get('expires_at') if isinstance(metadata, dict) else None
+                        if expires_at:
+                            try:
+                                ttl_seconds = int((datetime.fromisoformat(expires_at) - datetime.now()).total_seconds())
+                            except ValueError:
+                                ttl_seconds = None
+                        if ttl_seconds and ttl_seconds > 0:
+                            self.kv_store.set_with_ttl(key, value, ttl_seconds, tags)
+                        else:
+                            self.kv_store.set(key, value, tags)
                         restored_count += 1
                         
                         if restored_count % 1000 == 0:
@@ -411,6 +422,10 @@ class BackupManager:
         
         self.logger.info(f"Cleaned up {deleted_count} old backups")
         return deleted_count
+
+    def prune_backups(self, keep_last: int = 10, keep_days: int = 30) -> int:
+        """Alias with release-friendly naming for backup retention policies."""
+        return self.cleanup_old_backups(keep_days=keep_days, keep_count=keep_last)
     
     def _get_all_keys(self) -> List[str]:
         """Get all keys from the key-value store."""

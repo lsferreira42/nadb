@@ -6,12 +6,23 @@ tagging and data compression.
 """
 
 # Import and re-export the main classes from nakv
+from _version import __version__
 from nakv import (
     KeyValueStore,
     KeyValueSync,
     KeyValueMetadata,
-    PerformanceMetrics
+    PerformanceMetrics,
+    StoredValue,
+    open_store
 )
 from storage_backends import StorageFactory
 
-__version__ = '0.1.4' 
+__all__ = [
+    "KeyValueStore",
+    "KeyValueSync",
+    "KeyValueMetadata",
+    "PerformanceMetrics",
+    "StoredValue",
+    "StorageFactory",
+    "open_store",
+]

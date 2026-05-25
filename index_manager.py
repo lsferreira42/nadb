@@ -45,6 +45,26 @@ class QueryResult:
     execution_time_ms: float
     cache_hit: bool = False
 
+    def to_dict(self) -> Dict[str, Any]:
+        """Return a dictionary representation for API compatibility."""
+        return {
+            "keys": self.keys,
+            "total_count": self.total_count,
+            "page": self.page,
+            "page_size": self.page_size,
+            "has_more": self.has_more,
+            "execution_time_ms": self.execution_time_ms,
+            "cache_hit": self.cache_hit,
+        }
+
+    def __getitem__(self, item: str) -> Any:
+        """Allow dictionary-style access in examples and older callers."""
+        return self.to_dict()[item]
+
+    def get(self, item: str, default: Any = None) -> Any:
+        """Dictionary-style get helper."""
+        return self.to_dict().get(item, default)
+
 
 @dataclass
 class IndexStats:
